@@ -50,7 +50,7 @@ fi
 if [[ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null)" == "yes" ]]; then
   chk "User lingering: enabled"
 else
-  warn "User lingering: disabled  →  sudo loginctl enable-linger $(id -un)"
+  fail "User lingering: disabled  →  sudo loginctl enable-linger $(id -un)"
 fi
 
 # ─── Docker daemon ───────────────────────────────────────────────────────────
@@ -101,12 +101,12 @@ echo "── Endpoints ───────────────────
 if curl -fsS --connect-timeout 5 http://127.0.0.1:3000/health >/dev/null 2>&1; then
   chk "MCP server (:3000/health): responding"
 else
-  warn "MCP server (:3000/health): no response"
+  fail "MCP server (:3000/health): no response  →  check: docker compose logs mcp-server"
 fi
 if curl -fsS --connect-timeout 5 http://127.0.0.1:5678 >/dev/null 2>&1; then
   chk "n8n UI (:5678): responding"
 else
-  warn "n8n UI (:5678): no response"
+  fail "n8n UI (:5678): no response  →  check: docker compose logs n8n"
 fi
 
 # ─── Optional: Edge CDP (only if reachable) ──────────────────────────────────

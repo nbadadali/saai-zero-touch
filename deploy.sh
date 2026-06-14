@@ -55,6 +55,8 @@ WSL_MEMORY_GB="6"
 # shellcheck disable=SC2034
 WSL_SWAP_GB="4"
 OPENCLAW_INSTALL_METHOD="npm"; OPENCLAW_GATEWAY_PORT="18789"
+OPENCLAW_VERSION=""       # pin version, e.g. "1.4.2"; blank = install latest
+REPO_REVISION=""          # pin repo tag/commit, e.g. "v1.0.0"; blank = pull latest main
 ENABLE_BROWSER_AUTOMATION="false"
 N8N_ENCRYPTION_KEY=""; N8N_JWT_SECRET=""; DB_POSTGRESDB_PASSWORD=""
 PGVECTOR_PASSWORD=""; MCP_AUTH_TOKEN=""; N8N_API_KEY=""
@@ -163,7 +165,7 @@ phase_preflight() {
 phase_packages() {
   phase "packages"
   run_step "sudo apt-get update -qq"
-  local pkgs=(curl git jq unzip ca-certificates gnupg lsb-release apt-transport-https python3 openssl)
+  local pkgs=(curl git jq unzip ca-certificates gnupg lsb-release apt-transport-https python3 python3-pip openssl)
   for p in "${pkgs[@]}"; do
     if dpkg -s "$p" &>/dev/null; then ok "$p present"
     else log "installing $p"; run_step "sudo apt-get install -y -qq $p"; fi
@@ -176,11 +178,36 @@ phase_wsl_config() {
   if grep -q "systemd=true" /etc/wsl.conf 2>/dev/null; then
     ok "systemd already enabled in /etc/wsl.conf"
   else
-    log "enabling systemd in /etc/wsl.conf"
-    run_step "sudo tee /etc/wsl.conf >/dev/null <<'EOF'
-[boot]
-systemd=true
-EOF"
+    log "enabling systemd in /etc/wsl.conf (merging, preserving existing sections)"
+    # Merge: update [boot] systemd=true without destroying other sections.
+    run_step "python3 - <<'PYEOF'
+import re, subprocess, sys
+
+path = '/etc/wsl.conf'
+try:
+    content = open(path).read()
+except FileNotFoundError:
+    content = ''
+
+# If [boot] section exists, set/add systemd=true inside it.
+# If not, append a [boot] section.
+boot_section = re.compile(r'(\[boot\][^\[]*)', re.DOTALL)
+systemd_line = re.compile(r'^(systemd\s*=\s*.*)$', re.MULTILINE)
+
+if boot_section.search(content):
+    def patch_boot(m):
+        block = m.group(1)
+        if systemd_line.search(block):
+            return systemd_line.sub('systemd=true', block)
+        return block.rstrip() + '\nsystemd=true\n'
+    new_content = boot_section.sub(patch_boot, content)
+else:
+    new_content = content.rstrip() + ('\n' if content else '') + '[boot]\nsystemd=true\n'
+
+tmp = path + '.tmp'
+open(tmp, 'w').write(new_content)
+subprocess.run(['sudo', 'mv', tmp, path], check=True)
+PYEOF"
     warn "wsl.conf changed — a 'wsl --shutdown' is required for it to take effect"
   fi
 }
@@ -244,8 +271,9 @@ phase_openclaw() {
   case "${OPENCLAW_INSTALL_METHOD}" in
     skip) warn "OPENCLAW_INSTALL_METHOD=skip — leaving OpenClaw untouched" ;;
     npm)
+      local pkg="openclaw"; [[ -n "${OPENCLAW_VERSION}" ]] && pkg="openclaw@${OPENCLAW_VERSION}"
       if command -v openclaw &>/dev/null; then ok "openclaw present: $(openclaw --version 2>/dev/null || echo unknown)"
-      else log "installing OpenClaw via npm"; run_step "npm install -g openclaw"; ok "openclaw installed"; fi ;;
+      else log "installing ${pkg} via npm"; run_step "npm install -g ${pkg}"; ok "openclaw installed"; fi ;;
     script)
       if command -v openclaw &>/dev/null; then ok "openclaw present"
       else log "installing OpenClaw via official installer"; run_step "curl -fsSL https://openclaw.ai/install.sh | bash"; fi ;;
@@ -330,13 +358,19 @@ phase_browser() {
 phase_repo() {
   phase "repo"
   if [[ -d "${REPO_DIR}/.git" ]]; then
-    log "repo exists — fetching latest"
-    run_step "git -C '${REPO_DIR}' pull --ff-only" || warn "git pull failed — keeping existing checkout"
-    ok "repo present at ${REPO_DIR}"
+    log "repo exists — fetching"
+    run_step "git -C '${REPO_DIR}' fetch --tags origin" || warn "git fetch failed — keeping existing checkout"
   else
     log "cloning ${REPO_URL}"
     run_step "git clone '${REPO_URL}' '${REPO_DIR}'"
-    ok "repo cloned to ${REPO_DIR}"
+  fi
+  if [[ -n "${REPO_REVISION}" ]]; then
+    log "pinning repo to ${REPO_REVISION}"
+    run_step "git -C '${REPO_DIR}' checkout '${REPO_REVISION}'"
+    ok "repo at ${REPO_REVISION} (${REPO_DIR})"
+  else
+    run_step "git -C '${REPO_DIR}' pull --ff-only" || warn "git pull failed — keeping existing checkout"
+    ok "repo at latest main (${REPO_DIR})"
   fi
 }
 
@@ -406,15 +440,34 @@ phase_autostart() {
   cat > "${script}" <<'AUTOEOF'
 #!/usr/bin/env bash
 # WSL login autostart — invoked by the Windows Startup launcher.
-set -euo pipefail
+set -uo pipefail
 LOG="$HOME/wsl-autostart.log"
 echo "[$(date)] autostart triggered" >> "$LOG"
-# Ensure the OpenClaw gateway is up
+
+# Ensure the OpenClaw gateway is up.
 systemctl --user start openclaw-gateway 2>/dev/null || true
-# Wait for Docker, then bring the stack up
-for i in $(seq 1 30); do docker info &>/dev/null && break; sleep 2; done
-cd "$(dirname "$(readlink -f "$0")")/.."
-docker compose up -d >> "$LOG" 2>&1
+
+# Wait up to 3 minutes for Docker daemon (slow cold-boot on some machines).
+WAITED=0
+until docker info &>/dev/null 2>&1; do
+  if [[ $WAITED -ge 180 ]]; then
+    echo "[$(date)] ERROR: Docker did not become ready after 3 minutes" >> "$LOG"
+    exit 1
+  fi
+  sleep 5; WAITED=$((WAITED+5))
+done
+echo "[$(date)] Docker ready after ${WAITED}s" >> "$LOG"
+
+STACK_DIR="$(dirname "$(readlink -f "$0")")/.."
+cd "$STACK_DIR"
+
+# Bring the stack up; retry once if the first attempt fails (e.g. image pull race).
+if ! docker compose up -d >> "$LOG" 2>&1; then
+  echo "[$(date)] first compose up failed — retrying in 15s" >> "$LOG"
+  sleep 15
+  docker compose up -d >> "$LOG" 2>&1 || echo "[$(date)] ERROR: compose up failed on retry" >> "$LOG"
+fi
+
 echo "[$(date)] stack started" >> "$LOG"
 AUTOEOF
   chmod +x "${script}"
@@ -424,7 +477,7 @@ AUTOEOF
 phase_validate() {
   phase "validate"
   if [[ -x "${SCRIPT_DIR}/healthcheck.sh" ]]; then
-    REPO_DIR="${REPO_DIR}" GATEWAY_PORT="${OPENCLAW_GATEWAY_PORT}" bash "${SCRIPT_DIR}/healthcheck.sh" || true
+    REPO_DIR="${REPO_DIR}" GATEWAY_PORT="${OPENCLAW_GATEWAY_PORT}" bash "${SCRIPT_DIR}/healthcheck.sh"
   else
     warn "healthcheck.sh not found next to deploy.sh — skipping automated validation"
   fi

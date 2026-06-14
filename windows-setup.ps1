@@ -18,10 +18,12 @@
 
 [CmdletBinding()]
 param(
-  [string]$WslDistro = "Ubuntu",
-  [string]$WslUser   = "nishant",
-  [int]$MemoryGB     = 6,
-  [int]$SwapGB       = 4,
+  [string]$WslDistro  = "Ubuntu",
+  [string]$WslUser    = "nishant",
+  # Linux path of the cloned app repo inside WSL2 (must match REPO_DIR in config.env).
+  [string]$WslRepoDir = "",
+  [int]$MemoryGB      = 6,
+  [int]$SwapGB        = 4,
   [switch]$EnableBrowser
 )
 
@@ -72,11 +74,22 @@ Write-Warn "Run 'wsl --shutdown' for memory settings to take effect"
 
 # ─── Step 3: login autostart ─────────────────────────────────────────────────
 Write-Section "STEP 3 - LOGIN AUTOSTART"
+
+# Resolve the repo path inside WSL: use explicit -WslRepoDir, or fall back to default.
+if ($WslRepoDir -eq "") {
+  $WslRepoDir = "/home/$WslUser/diplomatic-expression-docker"
+  Write-Info "WslRepoDir not specified — using default: $WslRepoDir"
+  Write-Info "Pass -WslRepoDir if REPO_DIR in config.env differs from the default."
+} else {
+  Write-Info "WslRepoDir: $WslRepoDir"
+}
+$autoStartScript = "$WslRepoDir/scripts/wsl-autostart.sh"
+
 $launcherDir = Join-Path $env:LOCALAPPDATA "OpenClaw"
 New-Item -ItemType Directory -Force -Path $launcherDir | Out-Null
 
 $wslLauncher = Join-Path $launcherDir "wsl-autostart.cmd"
-$wslLauncherBody = "@echo off`r`nwsl.exe -d $WslDistro -- bash -lc `"/home/$WslUser/diplomatic-expression-docker/scripts/wsl-autostart.sh`""
+$wslLauncherBody = "@echo off`r`nwsl.exe -d $WslDistro -- bash -lc `"$autoStartScript`""
 Set-Content -Path $wslLauncher -Value $wslLauncherBody -Encoding ASCII
 Write-Ok "WSL launcher: $wslLauncher"
 
@@ -85,6 +98,19 @@ $startupEntry = Join-Path $startupDir "OpenClaw-n8n-autostart.cmd"
 $startupBody = "@echo off`r`ncall `"$wslLauncher`""
 Set-Content -Path $startupEntry -Value $startupBody -Encoding ASCII
 Write-Ok "Startup entry: $startupEntry"
+
+# Scheduled task with a 2-minute delay ensures the stack comes up even on slow
+# cold boots where the Startup launcher fires before WSL networking is ready.
+$autoTaskName = "OpenClaw-Stack-DelayedStart"
+if (Get-ScheduledTask -TaskName $autoTaskName -ErrorAction SilentlyContinue) {
+  Unregister-ScheduledTask -TaskName $autoTaskName -Confirm:$false
+}
+$autoAction  = New-ScheduledTaskAction -Execute "wsl.exe" -Argument "-d $WslDistro -- bash -lc `"$autoStartScript`""
+$autoTrigger = New-ScheduledTaskTrigger -AtLogOn
+$autoTrigger.Delay = "PT2M"   # 2-minute delay after logon
+$autoSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
+Register-ScheduledTask -TaskName $autoTaskName -Action $autoAction -Trigger $autoTrigger -Settings $autoSettings -RunLevel Highest -Description "OpenClaw: bring up WSL stack 2 minutes after logon (covers slow cold boots)" | Out-Null
+Write-Ok "Delayed scheduled task registered: $autoTaskName (fires 2 min after logon)"
 
 # ─── Step 4-6: Edge CDP (optional) ───────────────────────────────────────────
 if ($EnableBrowser) {

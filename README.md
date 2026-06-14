@@ -70,6 +70,13 @@ Set-ExecutionPolicy Bypass -Scope Process -Force
 .\windows-setup.ps1 -WslDistro 'Ubuntu' -WslUser '<your-linux-user>'
 ```
 
+If `REPO_DIR` in `config.env` differs from the default (`~/diplomatic-expression-docker`),
+pass `-WslRepoDir` so the Windows launcher points at the right path:
+
+```powershell
+.\windows-setup.ps1 -WslUser '<your-linux-user>' -WslRepoDir '/home/<user>/my-custom-dir'
+```
+
 Add `-EnableBrowser` only if this client needs OpenClaw browser automation:
 
 ```powershell
