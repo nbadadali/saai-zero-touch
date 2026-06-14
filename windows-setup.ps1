@@ -48,7 +48,9 @@ Write-Section "STEP 1 - WSL DISTRO"
 $distroList = (wsl -l -q) -join "`n"
 Write-Info "Installed distros:`n$distroList"
 if ($distroList -notmatch [regex]::Escape($WslDistro)) {
-  Write-Warn "Distro '$WslDistro' not found above. Update -WslDistro if the name differs."
+  Write-Fail "Distro '$WslDistro' not found in the list above."
+  Write-Fail "Re-run with the correct -WslDistro name (e.g. -WslDistro 'Ubuntu-22.04')."
+  exit 1
 } else {
   Write-Ok "Distro '$WslDistro' confirmed"
 }

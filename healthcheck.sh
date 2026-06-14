@@ -17,6 +17,18 @@ if [[ -t 1 ]]; then
   RED=$'\033[0;31m'; GRN=$'\033[0;32m'; YLW=$'\033[1;33m'; RST=$'\033[0m'
 else RED=""; GRN=""; YLW=""; RST=""; fi
 
+# Resolve REPO_DIR and GATEWAY_PORT: env override > config.env next to this script > built-in default.
+# Running "bash healthcheck.sh" after a non-default REPO_DIR deploy just works.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_FILE="${SCRIPT_DIR}/config.env"
+if [[ -z "${REPO_DIR:-}" && -f "${CONFIG_FILE}" ]]; then
+  _rd="$(bash -c "source '${CONFIG_FILE}' 2>/dev/null; eval echo \"\${REPO_DIR:-}\"" 2>/dev/null || true)"
+  [[ -n "${_rd}" ]] && REPO_DIR="${_rd}"
+fi
+if [[ -z "${GATEWAY_PORT:-}" && -f "${CONFIG_FILE}" ]]; then
+  _gp="$(bash -c "source '${CONFIG_FILE}' 2>/dev/null; echo \"\${OPENCLAW_GATEWAY_PORT:-}\"" 2>/dev/null || true)"
+  [[ -n "${_gp}" ]] && GATEWAY_PORT="${_gp}"
+fi
 REPO_DIR="${REPO_DIR:-$HOME/diplomatic-expression-docker}"
 COMPOSE="${REPO_DIR}/docker-compose.yml"
 GATEWAY_PORT="${GATEWAY_PORT:-18789}"

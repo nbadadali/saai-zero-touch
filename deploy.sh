@@ -292,12 +292,10 @@ phase_gateway() {
   run_step "sudo loginctl enable-linger ${LINUX_USER}"
   mkdir -p "${SYSTEMD_USER_DIR}"
 
-  if [[ -f "${GATEWAY_UNIT}" ]]; then
-    ok "gateway unit already exists — leaving it untouched (idempotent, preserves working config)"
-  else
-    local bin; bin="$(command -v openclaw)"
-    log "creating ${GATEWAY_UNIT}"
-    cat > "${GATEWAY_UNIT}" <<EOF
+  local bin; bin="$(command -v openclaw)"
+  # Desired unit content — used both for creation and drift detection.
+  local desired_unit
+  desired_unit="$(cat <<EOF
 [Unit]
 Description=OpenClaw AI Gateway
 After=network.target
@@ -313,6 +311,18 @@ WorkingDirectory=${HOME_DIR}
 [Install]
 WantedBy=default.target
 EOF
+)"
+  if [[ -f "${GATEWAY_UNIT}" ]]; then
+    if [[ "$(cat "${GATEWAY_UNIT}")" == "${desired_unit}" ]]; then
+      ok "gateway unit present and up to date"
+    else
+      log "gateway unit config drift detected — regenerating"
+      printf '%s\n' "${desired_unit}" > "${GATEWAY_UNIT}"
+      ok "gateway unit regenerated (port, binary, or env changed)"
+    fi
+  else
+    log "creating ${GATEWAY_UNIT}"
+    printf '%s\n' "${desired_unit}" > "${GATEWAY_UNIT}"
     ok "gateway unit created"
   fi
 
