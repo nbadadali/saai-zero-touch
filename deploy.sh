@@ -449,9 +449,21 @@ phase_autostart() {
   $DRY_RUN && { echo "   ${YLW}[dry-run]${RST} would write ${script}"; return 0; }
   cat > "${script}" <<'AUTOEOF'
 #!/usr/bin/env bash
-# WSL login autostart — invoked by the Windows Startup launcher.
+# WSL login autostart — invoked by both the Windows Startup launcher (immediately)
+# and the delayed scheduled task (2 min later). The flock mutex ensures only the
+# first invocation does real work; the second exits cleanly without duplicate logs.
 set -uo pipefail
 LOG="$HOME/wsl-autostart.log"
+LOCK="/tmp/wsl-autostart.lock"
+
+# Acquire an exclusive lock (non-blocking). If another instance holds it, exit quietly.
+exec 9>"${LOCK}"
+if ! flock -n 9; then
+  echo "[$(date)] autostart already running — skipping duplicate trigger" >> "$LOG"
+  exit 0
+fi
+trap 'rm -f "${LOCK}"' EXIT
+
 echo "[$(date)] autostart triggered" >> "$LOG"
 
 # Ensure the OpenClaw gateway is up.

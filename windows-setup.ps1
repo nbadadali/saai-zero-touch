@@ -91,7 +91,7 @@ $launcherDir = Join-Path $env:LOCALAPPDATA "OpenClaw"
 New-Item -ItemType Directory -Force -Path $launcherDir | Out-Null
 
 $wslLauncher = Join-Path $launcherDir "wsl-autostart.cmd"
-$wslLauncherBody = "@echo off`r`nwsl.exe -d $WslDistro -- bash -lc `"$autoStartScript`""
+$wslLauncherBody = "@echo off`r`nwsl.exe -d $WslDistro -u $WslUser -- bash -lc `"$autoStartScript`""
 Set-Content -Path $wslLauncher -Value $wslLauncherBody -Encoding ASCII
 Write-Ok "WSL launcher: $wslLauncher"
 
@@ -107,7 +107,7 @@ $autoTaskName = "OpenClaw-Stack-DelayedStart"
 if (Get-ScheduledTask -TaskName $autoTaskName -ErrorAction SilentlyContinue) {
   Unregister-ScheduledTask -TaskName $autoTaskName -Confirm:$false
 }
-$autoAction  = New-ScheduledTaskAction -Execute "wsl.exe" -Argument "-d $WslDistro -- bash -lc `"$autoStartScript`""
+$autoAction  = New-ScheduledTaskAction -Execute "wsl.exe" -Argument "-d $WslDistro -u $WslUser -- bash -lc `"$autoStartScript`""
 $autoTrigger = New-ScheduledTaskTrigger -AtLogOn
 $autoTrigger.Delay = "PT2M"   # 2-minute delay after logon
 $autoSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
