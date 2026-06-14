@@ -87,6 +87,15 @@ if ($WslRepoDir -eq "") {
 }
 $autoStartScript = "$WslRepoDir/scripts/wsl-autostart.sh"
 
+# Verify the autostart script exists inside WSL before writing any launcher files.
+$scriptExists = (wsl -d $WslDistro -u $WslUser -- test -f $autoStartScript; $LASTEXITCODE -eq 0)
+if (-not $scriptExists) {
+  Write-Fail "Autostart script not found inside WSL at: $autoStartScript"
+  Write-Fail "Run deploy.sh inside WSL first, or pass the correct -WslRepoDir path."
+  exit 1
+}
+Write-Ok "Autostart script confirmed at $autoStartScript"
+
 $launcherDir = Join-Path $env:LOCALAPPDATA "OpenClaw"
 New-Item -ItemType Directory -Force -Path $launcherDir | Out-Null
 
