@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
   Windows host configuration for the OpenClaw + n8n stack (WSL2).
 
@@ -217,4 +217,3 @@ Write-Host "    1. wsl --shutdown        (apply .wslconfig + systemd)"
 Write-Host "    2. Reopen WSL, run:  ./deploy.sh"
 Write-Host "    3. Validate:         bash ~/InitialSetup/healthcheck.sh (or healthcheck.sh in the deploy folder)"
 Write-Host ""
-    
