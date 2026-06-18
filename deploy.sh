@@ -247,13 +247,26 @@ dc() { if docker info &>/dev/null; then docker "$@"; else sg docker -c "docker $
 
 phase_node() {
   phase "node"
+  # OpenClaw requires Node.js v22.19+. Check the *system* node (used by systemd
+  # services) not just the shell's node (which may come from nvm).
+  local node_ok=false
   if command -v node &>/dev/null; then
-    ok "node present: $(node --version)"
+    local node_ver; node_ver="$(node --version 2>/dev/null | tr -d 'v')"
+    local node_major; node_major="${node_ver%%.*}"
+    if [[ "${node_major:-0}" -ge 22 ]]; then
+      ok "node present and meets v22+ requirement: v${node_ver}"
+      node_ok=true
+    else
+      warn "node v${node_ver} installed but openclaw requires v22+. Upgrading system Node.js via NodeSource 22.x..."
+    fi
   else
-    log "installing Node.js LTS via NodeSource"
-    run_step "curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -"
+    log "node not found — installing Node.js 22 via NodeSource"
+  fi
+
+  if ! $node_ok; then
+    run_step "curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -"
     run_step "sudo apt-get install -y -qq nodejs"
-    ok "node installed: $(node --version 2>/dev/null || echo unknown)"
+    ok "node installed: $(/usr/bin/node --version 2>/dev/null || echo unknown)"
   fi
   run_step "mkdir -p ${NPM_GLOBAL}"
   run_step "npm config set prefix ${NPM_GLOBAL}"
@@ -271,7 +284,9 @@ phase_openclaw() {
   case "${OPENCLAW_INSTALL_METHOD}" in
     skip) warn "OPENCLAW_INSTALL_METHOD=skip — leaving OpenClaw untouched" ;;
     npm)
-      local pkg="openclaw"; [[ -n "${OPENCLAW_VERSION}" ]] && pkg="openclaw@${OPENCLAW_VERSION}"
+      # Always use @latest by default — bare "openclaw" resolves to a squatted
+      # placeholder (v0.0.1, no binary). A pinned OPENCLAW_VERSION overrides.
+      local pkg="openclaw@latest"; [[ -n "${OPENCLAW_VERSION}" ]] && pkg="openclaw@${OPENCLAW_VERSION}"
       if command -v openclaw &>/dev/null; then ok "openclaw present: $(openclaw --version 2>/dev/null || echo unknown)"
       else log "installing ${pkg} via npm"; run_step "npm install -g ${pkg}"; ok "openclaw installed"; fi ;;
     script)
@@ -302,7 +317,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=${bin} gateway --port ${OPENCLAW_GATEWAY_PORT}
+ExecStart=${bin} gateway --port ${OPENCLAW_GATEWAY_PORT} --allow-unconfigured
 Restart=always
 RestartSec=5
 Environment=OPENCLAW_GATEWAY_PORT=${OPENCLAW_GATEWAY_PORT}
@@ -399,11 +414,20 @@ phase_env_file() {
   # This keeps secrets STABLE across re-runs (rotating N8N_ENCRYPTION_KEY would
   # make n8n unable to decrypt existing credentials).
   read_existing() { grep "^$1=" "${ENV_DEST}" 2>/dev/null | head -1 | cut -d= -f2- ; }
+  is_placeholder() {
+    # Returns 0 (true) when the value is a .env.example placeholder that must be replaced.
+    local v="$1"
+    [[ -z "$v" ]] && return 0
+    [[ "$v" == replace-with-* ]] && return 0
+    [[ "$v" == change-me* ]] && return 0
+    [[ "$v" == choose-a-* ]] && return 0
+    return 1
+  }
   resolve_secret() { # varname
     local name="$1" cfgval="${!1}" exist
     exist="$(read_existing "$name")"
-    if   [[ -n "${cfgval}" ]]; then printf '%s' "${cfgval}"
-    elif [[ -n "${exist}"  ]]; then printf '%s' "${exist}"
+    if   [[ -n "${cfgval}" ]] && ! is_placeholder "${cfgval}"; then printf '%s' "${cfgval}"
+    elif [[ -n "${exist}"  ]] && ! is_placeholder "${exist}";  then printf '%s' "${exist}"
     else log "generated ${name}" >&2; gen_secret; fi
   }
 
