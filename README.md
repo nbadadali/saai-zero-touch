@@ -1,6 +1,9 @@
 # SAAI Stack — Deployment Runbook
 **OpenClaw + n8n on WSL2 (Ubuntu / Windows)**
 
+> **New deployment?** Start with [QUICKSTART.md](QUICKSTART.md) — step-by-step
+> for a fresh machine with a sign-off checklist at the end.
+
 This package deploys the stack on a client machine with the **minimum possible
 human interaction**. It is not 100% zero-touch — and this document is honest
 about exactly why, and which steps remain manual.
@@ -182,7 +185,7 @@ Usual causes: a `CHANGE_ME` left in `.env`, or Postgres/Redis not healthy yet.
 
 **Edge CDP not reachable from WSL** —
 ```bash
-curl http://172.17.0.1:9222/json/version
+curl http://$(ip route show default | awk '{print $3; exit}'):9222/json/version
 ```
 If empty/refused, in PowerShell (Admin): `& "C:\Scripts\Start-OpenClaw-CDP.ps1"`.
 
