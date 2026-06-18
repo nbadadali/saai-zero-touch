@@ -121,9 +121,25 @@ else
   fail "n8n UI (:5678): no response  →  check: docker compose logs n8n"
 fi
 
-# ─── Optional: Edge CDP (only if reachable) ──────────────────────────────────
-if curl -fsS --connect-timeout 3 http://172.17.0.1:9222/json/version >/dev/null 2>&1; then
-  chk "Edge CDP (172.17.0.1:9222): reachable"
+# ─── Edge CDP (Windows host via WSL gateway) ─────────────────────────────────
+# Detect Windows host IP from the WSL default route (same IP the portproxy listens on).
+WIN_HOST_IP="$(ip route show default 2>/dev/null | awk '/default/ {print $3; exit}')"
+if [[ -z "${WIN_HOST_IP}" ]]; then
+  warn "Edge CDP: could not detect Windows host IP from WSL default route"
+else
+  CDP_URL="http://${WIN_HOST_IP}:9222/json/version"
+  CDP_RESP="$(curl -fsS --connect-timeout 5 "${CDP_URL}" 2>/dev/null)"
+  if [[ -z "${CDP_RESP}" ]]; then
+    fail "Edge CDP (${WIN_HOST_IP}:9222): no response  →  run windows-setup.ps1 -EnableBrowser and ensure Edge is open with CDP"
+  else
+    # Extract Browser field from JSON response to confirm it's actually Edge
+    BROWSER_VER="$(echo "${CDP_RESP}" | grep -o '"Browser": *"[^"]*"' | cut -d'"' -f4)"
+    if [[ -n "${BROWSER_VER}" ]]; then
+      chk "Edge CDP (${WIN_HOST_IP}:9222): reachable — ${BROWSER_VER}"
+    else
+      warn "Edge CDP (${WIN_HOST_IP}:9222): responded but could not parse Browser field"
+    fi
+  fi
 fi
 
 # ─── Summary ─────────────────────────────────────────────────────────────────
