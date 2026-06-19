@@ -115,14 +115,15 @@ $autoTaskName = "OpenClaw-Stack-DelayedStart"
 if (Get-ScheduledTask -TaskName $autoTaskName -ErrorAction SilentlyContinue) {
   Unregister-ScheduledTask -TaskName $autoTaskName -Confirm:$false
 }
-$autoAction   = New-ScheduledTaskAction -Execute "wsl.exe" -Argument "-d $WslDistro -u $WslUser -- echo started"
+# Keep WSL alive for 3 minutes so systemd has time to fully start user services
+# (n8n-stack.service, openclaw-gateway.service). After that, Docker processes
+# keep the WSL VM running on their own.
+$autoAction   = New-ScheduledTaskAction -Execute "wsl.exe" -Argument "-d $WslDistro -u $WslUser -- sleep 180"
 $autoTrigger  = New-ScheduledTaskTrigger -AtLogOn
 $autoTrigger.Delay = "PT1M30S"
-$autoSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
-# RunLevel Limited (NOT Highest) -- WSL2 distros are per-user and fail to start
-# correctly when launched from an elevated/admin process.
+$autoSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
 $principal    = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
-Register-ScheduledTask -TaskName $autoTaskName -Action $autoAction -Trigger $autoTrigger -Settings $autoSettings -Principal $principal -Description "OpenClaw: wake WSL 90s after logon -- systemd handles the rest" | Out-Null
+Register-ScheduledTask -TaskName $autoTaskName -Action $autoAction -Trigger $autoTrigger -Settings $autoSettings -Principal $principal -Description "OpenClaw: keep WSL alive 3 min after logon so systemd can start services" | Out-Null
 Write-Ok "Delayed scheduled task registered: $autoTaskName (fires 90 s after logon)"
 
 # --- Step 4-6: Edge CDP (optional) -------------------------------------------
