@@ -1,0 +1,4 @@
+# Local-only files -- do not push to GitHub
+docs/
+logs.txt
+config.env
