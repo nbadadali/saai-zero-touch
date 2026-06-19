@@ -119,7 +119,10 @@ $autoAction   = New-ScheduledTaskAction -Execute "wsl.exe" -Argument "-d $WslDis
 $autoTrigger  = New-ScheduledTaskTrigger -AtLogOn
 $autoTrigger.Delay = "PT1M30S"
 $autoSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
-Register-ScheduledTask -TaskName $autoTaskName -Action $autoAction -Trigger $autoTrigger -Settings $autoSettings -RunLevel Highest -Description "OpenClaw: wake WSL 90s after logon -- systemd handles the rest" | Out-Null
+# RunLevel Limited (NOT Highest) -- WSL2 distros are per-user and fail to start
+# correctly when launched from an elevated/admin process.
+$principal    = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
+Register-ScheduledTask -TaskName $autoTaskName -Action $autoAction -Trigger $autoTrigger -Settings $autoSettings -Principal $principal -Description "OpenClaw: wake WSL 90s after logon -- systemd handles the rest" | Out-Null
 Write-Ok "Delayed scheduled task registered: $autoTaskName (fires 90 s after logon)"
 
 # --- Step 4-6: Edge CDP (optional) -------------------------------------------
