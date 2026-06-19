@@ -518,6 +518,29 @@ echo "[$(date)] stack started" >> "$LOG"
 AUTOEOF
   chmod +x "${script}"
   ok "autostart script written: ${script}"
+
+  # Register wsl-autostart.sh as a systemd user service so it runs automatically
+  # every time WSL starts — exactly the same mechanism as openclaw-gateway.service.
+  # This is the most reliable way to start Docker containers on boot.
+  local svc_dir="${HOME}/.config/systemd/user"
+  run_step "mkdir -p ${svc_dir}"
+  $DRY_RUN && { echo "   ${YLW}[dry-run]${RST} would write ${svc_dir}/n8n-stack.service"; return 0; }
+  cat > "${svc_dir}/n8n-stack.service" << SVCEOF
+[Unit]
+Description=n8n Docker Stack (n8n + postgres + redis + mcp-server)
+After=default.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -l ${script}
+
+[Install]
+WantedBy=default.target
+SVCEOF
+  run_step "systemctl --user daemon-reload"
+  run_step "systemctl --user enable n8n-stack.service"
+  ok "systemd user service enabled: n8n-stack.service"
 }
 
 phase_validate() {
