@@ -191,6 +191,12 @@ nvm use --delete-prefix v22.23.0 --silent
 
 ### Stack not up after reboot
 
+Check the autostart log first — it shows exactly what happened:
+
+```bash
+cat ~/.openclaw-autostart.log
+```
+
 Check that the scheduled task ran:
 
 ```powershell
