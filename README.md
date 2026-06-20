@@ -150,12 +150,15 @@ bash ~/saai-deploy/healthcheck.sh
 |------|-----------|-------------|
 | Docker containers | ✅ | `restart: unless-stopped` |
 | Docker service | ✅ | systemd (enabled) |
-| OpenClaw gateway | ✅ | systemd user service + linger |
+| OpenClaw gateway | ✅ | `openclaw-gateway.service` systemd user service + linger |
+| n8n Docker stack | ✅ | `n8n-stack.service` systemd user service + linger |
 | `.wslconfig` / systemd | ✅ | written once by `windows-setup.ps1` |
 | Windows Startup launcher | ✅ | `windows-setup.ps1` |
-| Stack auto-up on login | ✅ | `wsl-autostart.sh` via Startup launcher |
+| WSL wake-up trigger | ✅ | `OpenClaw-Stack-DelayedStart` Scheduled Task (fires 90 s after logon) |
 | portproxy (9222) | ❌ → re-applied | Scheduled Task at logon |
 | Edge with `--remote-debugging` | ❌ → relaunched | Scheduled Task at logon |
+
+**How the startup chain works:** Windows fires the Scheduled Task 90 seconds after login, which runs `wsl.exe … sleep 180` — keeping the WSL2 VM alive for 3 minutes. During that window, systemd (with linger enabled) starts `openclaw-gateway.service` and `n8n-stack.service`. Once the Docker containers are running they keep the WSL VM alive indefinitely.
 
 ---
 
@@ -164,6 +167,24 @@ bash ~/saai-deploy/healthcheck.sh
 **`docker` permission denied right after install** — group membership needs a
 fresh shell. The scripts use `sg docker` to work around it during the run; for
 your own shell, run `newgrp docker` or just reopen the terminal.
+
+**Stack not up after reboot** — Check the autostart log:
+```bash
+cat ~/wsl-autostart.log
+```
+Check systemd service status:
+```bash
+systemctl --user status n8n-stack.service
+systemctl --user status openclaw-gateway.service
+```
+Verify the Scheduled Task ran from PowerShell:
+```powershell
+Get-ScheduledTask -TaskName "OpenClaw-Stack-DelayedStart"
+```
+Start the stack manually if needed:
+```bash
+cd ~/diplomatic-expression-docker && docker compose up -d
+```
 
 **Gateway not active** —
 ```bash

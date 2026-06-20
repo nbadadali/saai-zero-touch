@@ -165,7 +165,7 @@ When it completes, the health check runs automatically and prints:
 
 ## Verify after a reboot
 
-Reboot the machine. After Windows login, wait **2 minutes** for the scheduled
+Reboot the machine. After Windows login, wait **3–4 minutes** for the scheduled
 task to bring the stack up, then:
 
 - Open http://localhost:5678 — n8n should load
@@ -191,19 +191,26 @@ nvm use --delete-prefix v22.23.0 --silent
 
 ### Stack not up after reboot
 
-Check the autostart log first — it shows exactly what happened:
+Allow **3–4 minutes** after login before checking. If still down, inspect the autostart log:
 
 ```bash
-cat ~/.openclaw-autostart.log
+cat ~/wsl-autostart.log
 ```
 
-Check that the scheduled task ran:
+Check systemd service status inside WSL:
+
+```bash
+systemctl --user status n8n-stack.service
+systemctl --user status openclaw-gateway.service
+```
+
+Verify the Windows Scheduled Task ran:
 
 ```powershell
 Get-ScheduledTask -TaskName "OpenClaw-Stack-DelayedStart"
 ```
 
-Manually trigger it if needed:
+Manually trigger if needed:
 
 ```powershell
 Start-ScheduledTask -TaskName "OpenClaw-Stack-DelayedStart"
@@ -212,7 +219,7 @@ Start-ScheduledTask -TaskName "OpenClaw-Stack-DelayedStart"
 Or start the stack directly from WSL:
 
 ```bash
-bash ~/diplomatic-expression-docker/scripts/wsl-autostart.sh
+cd ~/diplomatic-expression-docker && docker compose up -d
 ```
 
 ### Gateway not active

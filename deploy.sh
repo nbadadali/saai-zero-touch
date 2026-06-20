@@ -97,6 +97,12 @@ GATEWAY_UNIT="${SYSTEMD_USER_DIR}/${GATEWAY_SERVICE}.service"
 NPM_GLOBAL="${HOME_DIR}/.npm-global"
 ENV_DEST="${REPO_DIR}/.env"
 
+# Ensure npm global bin is in PATH for ALL phases.
+# Each phase runs in a subshell (left side of the | tee pipe), so PATH exports
+# inside phase functions don't carry over to sibling phases.  Exporting here in
+# the parent shell lets every phase subshell inherit the correct PATH.
+export PATH="${NPM_GLOBAL}/bin:${PATH}"
+
 CURRENT_PHASE=""
 
 run_step() { # echo + run, respecting dry-run.
