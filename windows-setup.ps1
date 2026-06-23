@@ -45,9 +45,13 @@ Write-Ok "Running as Administrator"
 
 # --- Step 1: confirm distro --------------------------------------------------
 Write-Section "STEP 1 - WSL DISTRO"
-wsl -d $WslDistro -- echo "ok" 2>&1 | Out-Null
-if ($LASTEXITCODE -ne 0) {
-  Write-Fail "Distro '$WslDistro' not found or not startable."
+# Use 'wsl --list' to check distro existence — avoids loading .wslconfig which
+# may contain unsupported keys (e.g. wsl2.pageReporting) on older WSL builds
+# that would cause a non-zero exit code and false "distro not found" error.
+$distroList = wsl --list --quiet 2>&1
+$distroFound = $distroList | Where-Object { $_ -match [regex]::Escape($WslDistro) }
+if (-not $distroFound) {
+  Write-Fail "Distro '$WslDistro' not found."
   Write-Fail "Re-run with the correct -WslDistro name (e.g. -WslDistro 'Ubuntu-22.04')."
   exit 1
 } else {
