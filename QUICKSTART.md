@@ -73,17 +73,27 @@ wsl --shutdown
 
 ## Step 3 — Deploy the stack (inside WSL2)
 
-Open **Ubuntu 22.04** from the Start menu. Copy the deployment folder into WSL
-and run:
+Open **Ubuntu 22.04** from the Start menu and clone directly from GitHub (avoids
+Windows CRLF line endings corrupting the shell scripts):
 
 ```bash
-cp -r /mnt/c/path/to/saai-zero-touch ~/saai-deploy
+git clone https://github.com/nbadadali/saai-zero-touch.git ~/saai-deploy
 cd ~/saai-deploy
 
 # Create your config file from the template
 cp config.env.example config.env
 nano config.env
 ```
+
+> **If you must copy from Windows instead of cloning**, strip Windows line endings
+> immediately after the copy or the scripts will fail:
+> ```bash
+> cp -r /mnt/c/path/to/saai-zero-touch ~/saai-deploy
+> cd ~/saai-deploy
+> sed -i 's/\r//' deploy.sh config.env.example
+> cp config.env.example config.env
+> nano config.env
+> ```
 
 ### What to fill in config.env
 
