@@ -48,7 +48,7 @@ Write-Section "STEP 1 - WSL DISTRO"
 # Use 'wsl --list' to check distro existence — avoids loading .wslconfig which
 # may contain unsupported keys (e.g. wsl2.pageReporting) on older WSL builds
 # that would cause a non-zero exit code and false "distro not found" error.
-$distroList = wsl --list --quiet 2>&1
+$distroList = (wsl --list --quiet 2>&1) -replace "`0", ""
 $distroFound = $distroList | Where-Object { $_ -match [regex]::Escape($WslDistro) }
 if (-not $distroFound) {
   Write-Fail "Distro '$WslDistro' not found."
