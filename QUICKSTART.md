@@ -105,6 +105,8 @@ Save and close (`Ctrl+X`, then `Y`, then `Enter` in nano).
 
 ```bash
 chmod +x deploy.sh healthcheck.sh
+sed -i 's/\r//' deploy.sh
+sed -i 's/\r//' config.env
 ./deploy.sh
 ```
 
@@ -240,16 +242,34 @@ Or close and reopen the WSL terminal.
 
 ### Edge CDP not reachable (if `-EnableBrowser` was used)
 
-From PowerShell (Admin):
+**Check current state (PowerShell):**
+
+```powershell
+# Verify portproxy rule exists
+netsh interface portproxy show all
+
+# Verify firewall rule is enabled
+Get-NetFirewallRule -DisplayName "OpenClaw Edge CDP 9222" | Select-Object DisplayName, Enabled, Direction, Action
+
+# Verify Edge is running with remote debugging
+Get-Process msedge -ErrorAction SilentlyContinue | Select-Object Id, ProcessName
+
+# Verify port 9222 is listening
+netstat -an | Select-String "9222"
+```
+
+**Check from WSL:**
+
+```bash
+# Get Windows host IP and test CDP endpoint
+WIN_IP=$(ip route show default | awk '{print $3; exit}')
+curl -s http://${WIN_IP}:9222/json/version | python3 -m json.tool
+```
+
+A successful response returns Edge browser info JSON. If it times out or is refused, restart CDP:
 
 ```powershell
 & "C:\Scripts\Start-OpenClaw-CDP.ps1"
-```
-
-Then verify from WSL:
-
-```bash
-curl http://$(ip route show default | awk '{print $3; exit}'):9222/json/version
 ```
 
 ---
@@ -278,4 +298,4 @@ Use this at the end of every client deployment:
 - [ ] http://localhost:5678 loads and login works
 - [ ] n8n API key generated and added to config.env
 - [ ] Machine rebooted and stack came back up automatically
-- [ ] (If `-EnableBrowser`) `curl .../json/version` returns Edge browser info
+- [ ] (If `-EnableBrowser`) `curl -s http://$(ip route show default | awk '{print $3; exit}'):9222/json/version` returns Edge browser info JSON
