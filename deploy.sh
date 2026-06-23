@@ -61,6 +61,7 @@ ENABLE_BROWSER_AUTOMATION="false"
 N8N_ENCRYPTION_KEY=""; N8N_JWT_SECRET=""; DB_POSTGRESDB_PASSWORD=""
 PGVECTOR_PASSWORD=""; MCP_AUTH_TOKEN=""; N8N_API_KEY=""
 WEBHOOK_URL="http://localhost:5678"; N8N_EDITOR_BASE_URL="http://localhost:5678"
+GENERIC_TIMEZONE="Asia/Dubai"; REDIS_PASSWORD=""
 
 DRY_RUN=false
 
@@ -450,6 +451,8 @@ phase_env_file() {
   set_env_var "MCP_AUTH_TOKEN"         "${MCP_AUTH_TOKEN}"         "${ENV_DEST}"
   set_env_var "WEBHOOK_URL"            "${WEBHOOK_URL}"            "${ENV_DEST}"
   set_env_var "N8N_EDITOR_BASE_URL"    "${N8N_EDITOR_BASE_URL}"    "${ENV_DEST}"
+  set_env_var "GENERIC_TIMEZONE"       "${GENERIC_TIMEZONE}"       "${ENV_DEST}"
+  set_env_var "REDIS_PASSWORD"         "${REDIS_PASSWORD}"         "${ENV_DEST}"
   [[ -n "${N8N_API_KEY}" ]] && set_env_var "N8N_API_KEY" "${N8N_API_KEY}" "${ENV_DEST}"
 
   chmod 600 "${ENV_DEST}"
