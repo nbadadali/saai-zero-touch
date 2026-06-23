@@ -43,10 +43,10 @@ cd C:\path\to\saai-zero-touch
 Set-ExecutionPolicy Bypass -Scope Process -Force
 ```
 
-Run the setup script with **your WSL username** (the one you chose in Step 1):
+Run the setup script with your WSL distro name:
 
 ```powershell
-.\windows-setup.ps1 -WslDistro 'Ubuntu-22.04' -WslUser 'YOUR_WSL_USERNAME'
+.\windows-setup.ps1 -WslDistro 'Ubuntu-22.04'
 ```
 
 **Optional flags:**
@@ -60,7 +60,7 @@ Run the setup script with **your WSL username** (the one you chose in Step 1):
 Example with all options:
 
 ```powershell
-.\windows-setup.ps1 -WslDistro 'Ubuntu-22.04' -WslUser 'john' -MemoryGB 12 -EnableBrowser
+.\windows-setup.ps1 -WslDistro 'Ubuntu-22.04' -MemoryGB 12 -EnableBrowser
 ```
 
 When the script finishes, apply WSL memory settings:
@@ -171,7 +171,7 @@ task to bring the stack up, then:
 - Open http://localhost:5678 — n8n should load
 - Optionally run the health check:
   ```bash
-  wsl -d Ubuntu-22.04 -u YOUR_WSL_USERNAME -- bash ~/saai-deploy/healthcheck.sh
+  wsl -d Ubuntu-22.04 -- bash ~/saai-deploy/healthcheck.sh
   ```
 
 ---

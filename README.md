@@ -70,20 +70,13 @@ Copy this folder somewhere on Windows (or access it via `\\wsl$`). In
 
 ```powershell
 Set-ExecutionPolicy Bypass -Scope Process -Force
-.\windows-setup.ps1 -WslDistro 'Ubuntu' -WslUser '<your-linux-user>'
-```
-
-If `REPO_DIR` in `config.env` differs from the default (`~/diplomatic-expression-docker`),
-pass `-WslRepoDir` so the Windows launcher points at the right path:
-
-```powershell
-.\windows-setup.ps1 -WslUser '<your-linux-user>' -WslRepoDir '/home/<user>/my-custom-dir'
+.\windows-setup.ps1 -WslDistro 'Ubuntu-22.04'
 ```
 
 Add `-EnableBrowser` only if this client needs OpenClaw browser automation:
 
 ```powershell
-.\windows-setup.ps1 -WslUser '<your-linux-user>' -MemoryGB 8 -EnableBrowser
+.\windows-setup.ps1 -WslDistro 'Ubuntu-22.04' -MemoryGB 8 -EnableBrowser
 ```
 
 Then apply WSL settings:

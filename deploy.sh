@@ -474,19 +474,28 @@ phase_stack() {
 
 phase_autostart() {
   phase "autostart"
-  local script="${REPO_DIR}/scripts/wsl-autostart.sh"
-  run_step "mkdir -p ${REPO_DIR}/scripts"
+
+  # Record the repo path so the autostart script can find the compose stack
+  # regardless of username or directory — supports any deployment layout.
+  echo "${REPO_DIR}" > "${HOME_DIR}/.saai-repo-path"
+  ok "repo path recorded: ${HOME_DIR}/.saai-repo-path -> ${REPO_DIR}"
+
+  # Place the autostart script outside the repo in a stable system location.
+  # The systemd unit references it via the %h specifier (expands to home dir
+  # at runtime) so no username or path is hardcoded anywhere.
+  local script="${HOME_DIR}/.local/bin/saai-autostart.sh"
+  run_step "mkdir -p ${HOME_DIR}/.local/bin"
   $DRY_RUN && { echo "   ${YLW}[dry-run]${RST} would write ${script}"; return 0; }
+
   cat > "${script}" <<'AUTOEOF'
 #!/usr/bin/env bash
-# WSL login autostart — invoked by both the Windows Startup launcher (immediately)
-# and the delayed scheduled task (2 min later). The flock mutex ensures only the
-# first invocation does real work; the second exits cleanly without duplicate logs.
+# saai-autostart.sh — invoked by n8n-stack.service (systemd user service).
+# Reads repo location from ~/.saai-repo-path — no hardcoded paths or usernames.
 set -uo pipefail
 LOG="$HOME/wsl-autostart.log"
-LOCK="/tmp/wsl-autostart.lock"
+LOCK="/tmp/saai-autostart.lock"
 
-# Acquire an exclusive lock (non-blocking). If another instance holds it, exit quietly.
+# Acquire an exclusive lock (non-blocking). Guards against duplicate triggers.
 exec 9>"${LOCK}"
 if ! flock -n 9; then
   echo "[$(date)] autostart already running — skipping duplicate trigger" >> "$LOG"
@@ -510,10 +519,20 @@ until docker info &>/dev/null 2>&1; do
 done
 echo "[$(date)] Docker ready after ${WAITED}s" >> "$LOG"
 
-STACK_DIR="$(dirname "$(readlink -f "$0")")/.."
-cd "$STACK_DIR"
+# Dynamically resolve the stack directory — no hardcoded path.
+REPO_PATH_FILE="$HOME/.saai-repo-path"
+if [[ ! -f "${REPO_PATH_FILE}" ]]; then
+  echo "[$(date)] ERROR: ${REPO_PATH_FILE} missing — re-run: ./deploy.sh --only autostart" >> "$LOG"
+  exit 1
+fi
+STACK_DIR="$(cat "${REPO_PATH_FILE}")"
+if [[ ! -d "${STACK_DIR}" ]]; then
+  echo "[$(date)] ERROR: repo dir '${STACK_DIR}' does not exist — update ${REPO_PATH_FILE}" >> "$LOG"
+  exit 1
+fi
+cd "${STACK_DIR}"
 
-# Bring the stack up; retry once if the first attempt fails (e.g. image pull race).
+# Bring the stack up; retry once on failure (e.g. image pull race on cold boot).
 if ! docker compose up -d >> "$LOG" 2>&1; then
   echo "[$(date)] first compose up failed — retrying in 15s" >> "$LOG"
   sleep 15
@@ -525,13 +544,12 @@ AUTOEOF
   chmod +x "${script}"
   ok "autostart script written: ${script}"
 
-  # Register wsl-autostart.sh as a systemd user service so it runs automatically
-  # every time WSL starts — exactly the same mechanism as openclaw-gateway.service.
-  # This is the most reliable way to start Docker containers on boot.
-  local svc_dir="${HOME}/.config/systemd/user"
+  # The %h systemd specifier expands to the user's home directory at runtime.
+  # This means the unit file contains zero hardcoded paths or usernames and
+  # works correctly for any Linux user on any machine.
+  local svc_dir="${HOME_DIR}/.config/systemd/user"
   run_step "mkdir -p ${svc_dir}"
-  $DRY_RUN && { echo "   ${YLW}[dry-run]${RST} would write ${svc_dir}/n8n-stack.service"; return 0; }
-  cat > "${svc_dir}/n8n-stack.service" << SVCEOF
+  cat > "${svc_dir}/n8n-stack.service" <<'SVCEOF'
 [Unit]
 Description=n8n Docker Stack (n8n + postgres + redis + mcp-server)
 After=default.target
@@ -539,7 +557,7 @@ After=default.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/bash -l ${script}
+ExecStart=/bin/bash %h/.local/bin/saai-autostart.sh
 
 [Install]
 WantedBy=default.target

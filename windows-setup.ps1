@@ -5,22 +5,26 @@
 .DESCRIPTION
   Idempotent. Safe to re-run. Configures:
     - .wslconfig memory/swap tuning
-    - Windows login autostart launcher (Startup folder)
+    - Scheduled Task: wakes the WSL2 VM at logon so systemd can start services
     - (optional) Edge CDP: portproxy + firewall + scheduled task
+
+  The Windows side requires only the WSL distro name.
+  All Linux paths and usernames are managed entirely by deploy.sh inside WSL.
 
 .EXAMPLE
   Set-ExecutionPolicy Bypass -Scope Process -Force
-  .\windows-setup.ps1 -WslDistro 'Ubuntu' -WslUser 'nishant'
+  .\windows-setup.ps1 -WslDistro 'Ubuntu-22.04'
 
 .EXAMPLE
-  .\windows-setup.ps1 -WslUser 'nishant' -MemoryGB 8 -SwapGB 4 -EnableBrowser
+  .\windows-setup.ps1 -WslDistro 'Ubuntu-22.04' -MemoryGB 8 -EnableBrowser
 #>
 
 [CmdletBinding()]
 param(
   [string]$WslDistro  = "Ubuntu",
-  [string]$WslUser    = "nishant",
-  # Linux path of the cloned app repo inside WSL2 (must match REPO_DIR in config.env).
+  # Deprecated — no longer used. Accepted for backward compatibility only.
+  [string]$WslUser    = "",
+  # Deprecated — no longer used. Accepted for backward compatibility only.
   [string]$WslRepoDir = "",
   [int]$MemoryGB      = 6,
   [int]$SwapGB        = 4,
@@ -76,59 +80,41 @@ Write-Ok ".wslconfig written ($MemoryGB GB mem / $SwapGB GB swap)"
 Write-Warn "Run 'wsl --shutdown' for memory settings to take effect"
 
 # --- Step 3: login autostart -------------------------------------------------
-Write-Section "STEP 3 - LOGIN AUTOSTART"
+Write-Section "STEP 3 - LOGIN AUTOSTART (WSL WAKE)"
 
-# Resolve the repo path inside WSL: use explicit -WslRepoDir, or fall back to default.
-if ($WslRepoDir -eq "") {
-  $WslRepoDir = "/home/$WslUser/diplomatic-expression-docker"
-  Write-Info "WslRepoDir not specified -- using default: $WslRepoDir"
-  Write-Info "Pass -WslRepoDir if REPO_DIR in config.env differs from the default."
-} else {
-  Write-Info "WslRepoDir: $WslRepoDir"
-}
-$autoStartScript = "$WslRepoDir/scripts/wsl-autostart.sh"
+# Design: Windows is responsible ONLY for waking the WSL2 VM after login.
+# Once WSL starts, systemd (PID 1) uses linger to auto-start user services:
+#   openclaw-gateway.service  — OpenClaw AI gateway
+#   n8n-stack.service         — Docker compose stack (n8n, postgres, redis, mcp)
+# No Linux paths or usernames are needed here. deploy.sh owns all of that.
 
-# Check if autostart script already exists (it's created later by deploy.sh -- warn if absent, don't fail).
-wsl -d $WslDistro -u $WslUser -- test -f $autoStartScript | Out-Null
-if ($LASTEXITCODE -eq 0) {
-  Write-Ok "Autostart script confirmed at $autoStartScript"
-} else {
-  Write-Warn "Autostart script not yet present at $autoStartScript"
-  Write-Warn "That's expected if deploy.sh hasn't run yet. Launcher files will be created now"
-  Write-Warn "and will work correctly after you run deploy.sh inside WSL."
-}
-
-$launcherDir = Join-Path $env:LOCALAPPDATA "OpenClaw"
-New-Item -ItemType Directory -Force -Path $launcherDir | Out-Null
-
-$wslLauncher = Join-Path $launcherDir "wsl-autostart.cmd"
-$wslLauncherBody = "@echo off`r`nwsl.exe -d $WslDistro -u $WslUser -- bash -lc `"$autoStartScript`""
-Set-Content -Path $wslLauncher -Value $wslLauncherBody -Encoding ASCII
-Write-Ok "WSL launcher: $wslLauncher"
-
+# Remove legacy Startup-folder launcher if present from an older deployment.
 $startupDir = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Startup"
-$startupEntry = Join-Path $startupDir "OpenClaw-n8n-autostart.cmd"
-$startupBody = "@echo off`r`ncall `"$wslLauncher`""
-Set-Content -Path $startupEntry -Value $startupBody -Encoding ASCII
-Write-Ok "Startup entry: $startupEntry"
+$legacyEntry = Join-Path $startupDir "OpenClaw-n8n-autostart.cmd"
+if (Test-Path $legacyEntry) {
+  Remove-Item $legacyEntry -Force
+  Write-Info "Removed legacy Startup entry: $legacyEntry"
+}
+$legacyLauncher = Join-Path $env:LOCALAPPDATA "OpenClaw\wsl-autostart.cmd"
+if (Test-Path $legacyLauncher) {
+  Remove-Item $legacyLauncher -Force
+  Write-Info "Removed legacy launcher: $legacyLauncher"
+}
 
-# Scheduled task: wakes WSL 90 s after logon.
-# systemd + linger then starts both openclaw-gateway.service and n8n-stack.service
-# automatically -- no wrapper script needed on the Windows side.
+# Register (or refresh) the Scheduled Task that wakes WSL 90 s after logon.
+# sleep 300 keeps the WSL VM alive for 5 minutes — enough time for Docker to
+# start and containers to come up, after which Docker processes keep WSL alive.
 $autoTaskName = "OpenClaw-Stack-DelayedStart"
 if (Get-ScheduledTask -TaskName $autoTaskName -ErrorAction SilentlyContinue) {
   Unregister-ScheduledTask -TaskName $autoTaskName -Confirm:$false
 }
-# Keep WSL alive for 3 minutes so systemd has time to fully start user services
-# (n8n-stack.service, openclaw-gateway.service). After that, Docker processes
-# keep the WSL VM running on their own.
-$autoAction   = New-ScheduledTaskAction -Execute "wsl.exe" -Argument "-d $WslDistro -u $WslUser -- sleep 180"
+$autoAction   = New-ScheduledTaskAction -Execute "wsl.exe" -Argument "-d $WslDistro -- sleep 300"
 $autoTrigger  = New-ScheduledTaskTrigger -AtLogOn
 $autoTrigger.Delay = "PT1M30S"
 $autoSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
 $principal    = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
-Register-ScheduledTask -TaskName $autoTaskName -Action $autoAction -Trigger $autoTrigger -Settings $autoSettings -Principal $principal -Description "OpenClaw: keep WSL alive 3 min after logon so systemd can start services" | Out-Null
-Write-Ok "Delayed scheduled task registered: $autoTaskName (fires 90 s after logon)"
+Register-ScheduledTask -TaskName $autoTaskName -Action $autoAction -Trigger $autoTrigger -Settings $autoSettings -Principal $principal -Description "OpenClaw: wake WSL2 VM 90s after logon — systemd+linger starts all services" | Out-Null
+Write-Ok "Scheduled task registered: $autoTaskName (fires 90 s after logon, no path/user dependency)"
 
 # --- Step 4-6: Edge CDP (optional) -------------------------------------------
 if ($EnableBrowser) {
@@ -210,11 +196,10 @@ Start-Process -FilePath "__EDGE__" -ArgumentList @(
 
 # --- Verification ------------------------------------------------------------
 Write-Section "VERIFICATION"
-Write-Info "Startup folder:"
-Get-ChildItem $startupDir -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $($_.Name)" }
+Write-Info "Scheduled tasks (OpenClaw):"
+Get-ScheduledTask | Where-Object { $_.TaskName -like "*OpenClaw*" } | Select-Object TaskName, State | Format-Table -AutoSize
 if ($EnableBrowser) {
-  Write-Info "`nportproxy:"; netsh interface portproxy show all
-  Write-Info "`nScheduled tasks (OpenClaw):"; Get-ScheduledTask | Where-Object { $_.TaskName -like "*OpenClaw*" } | Select-Object TaskName, State | Format-Table -AutoSize
+  Write-Info "portproxy:"; netsh interface portproxy show all
 }
 
 Write-Host "`n============================================" -ForegroundColor Green
