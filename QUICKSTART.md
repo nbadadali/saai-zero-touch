@@ -99,6 +99,17 @@ Only two things need your attention on a fresh install:
 - `WEBHOOK_URL` / `N8N_EDITOR_BASE_URL` — leave as `http://localhost:5678` for local installs
 - `OPENCLAW_VERSION` — leave blank for latest
 
+**If this client needs browser automation (Edge CDP):**
+```bash
+# Set before running deploy.sh — cannot be changed mid-run
+ENABLE_BROWSER_AUTOMATION="true"
+```
+If you forgot to set this and deploy.sh already ran, fix it and resume:
+```bash
+nano ~/saai-deploy/config.env   # set ENABLE_BROWSER_AUTOMATION="true"
+./deploy.sh --from browser
+```
+
 Save and close (`Ctrl+X`, then `Y`, then `Enter` in nano).
 
 ### Run the deployment
