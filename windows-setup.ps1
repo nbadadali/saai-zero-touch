@@ -22,9 +22,9 @@
 [CmdletBinding()]
 param(
   [string]$WslDistro  = "Ubuntu",
-  # Deprecated — no longer used. Accepted for backward compatibility only.
+  # Deprecated  -- no longer used. Accepted for backward compatibility only.
   [string]$WslUser    = "",
-  # Deprecated — no longer used. Accepted for backward compatibility only.
+  # Deprecated  -- no longer used. Accepted for backward compatibility only.
   [string]$WslRepoDir = "",
   [int]$MemoryGB      = 6,
   [int]$SwapGB        = 4,
@@ -49,7 +49,7 @@ Write-Ok "Running as Administrator"
 
 # --- Step 1: confirm distro --------------------------------------------------
 Write-Section "STEP 1 - WSL DISTRO"
-# Use 'wsl --list' to check distro existence — avoids loading .wslconfig which
+# Use 'wsl --list' to check distro existence  -- avoids loading .wslconfig which
 # may contain unsupported keys (e.g. wsl2.pageReporting) on older WSL builds
 # that would cause a non-zero exit code and false "distro not found" error.
 $distroList = (wsl --list --quiet 2>&1) -replace "`0", ""
@@ -84,8 +84,8 @@ Write-Section "STEP 3 - LOGIN AUTOSTART (WSL WAKE)"
 
 # Design: Windows is responsible ONLY for waking the WSL2 VM after login.
 # Once WSL starts, systemd (PID 1) uses linger to auto-start user services:
-#   openclaw-gateway.service  — OpenClaw AI gateway
-#   n8n-stack.service         — Docker compose stack (n8n, postgres, redis, mcp)
+#   openclaw-gateway.service   -- OpenClaw AI gateway
+#   n8n-stack.service          -- Docker compose stack (n8n, postgres, redis, mcp)
 # No Linux paths or usernames are needed here. deploy.sh owns all of that.
 
 # Remove legacy Startup-folder launcher if present from an older deployment.
@@ -102,7 +102,7 @@ if (Test-Path $legacyLauncher) {
 }
 
 # Register (or refresh) the Scheduled Task that wakes WSL 90 s after logon.
-# sleep 300 keeps the WSL VM alive for 5 minutes — enough time for Docker to
+# sleep 300 keeps the WSL VM alive for 5 minutes  -- enough time for Docker to
 # start and containers to come up, after which Docker processes keep WSL alive.
 $autoTaskName = "OpenClaw-Stack-DelayedStart"
 if (Get-ScheduledTask -TaskName $autoTaskName -ErrorAction SilentlyContinue) {
@@ -113,7 +113,7 @@ $autoTrigger  = New-ScheduledTaskTrigger -AtLogOn
 $autoTrigger.Delay = "PT1M30S"
 $autoSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
 $principal    = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
-Register-ScheduledTask -TaskName $autoTaskName -Action $autoAction -Trigger $autoTrigger -Settings $autoSettings -Principal $principal -Description "OpenClaw: wake WSL2 VM 90s after logon — systemd+linger starts all services" | Out-Null
+Register-ScheduledTask -TaskName $autoTaskName -Action $autoAction -Trigger $autoTrigger -Settings $autoSettings -Principal $principal -Description "OpenClaw: wake WSL2 VM 90s after logon  -- systemd+linger starts all services" | Out-Null
 Write-Ok "Scheduled task registered: $autoTaskName (fires 90 s after logon, no path/user dependency)"
 
 # --- Step 4-6: Edge CDP (optional) -------------------------------------------
@@ -211,3 +211,4 @@ Write-Host "    1. wsl --shutdown        (apply .wslconfig + systemd)"
 Write-Host "    2. Reopen WSL, run:  ./deploy.sh"
 Write-Host "    3. Validate:         bash ~/InitialSetup/healthcheck.sh (or healthcheck.sh in the deploy folder)"
 Write-Host ""
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     
