@@ -120,6 +120,12 @@ Write-Ok "Scheduled task registered: $autoTaskName (fires 90 s after logon, no p
 if ($EnableBrowser) {
   Write-Section "STEP 4 - EDGE CDP (PORTPROXY + FIREWALL + TASK)"
 
+  # The vEthernet (WSL) adapter only exists while WSL2 is running.
+  # Wake WSL now so the adapter appears, then detect the IP.
+  Write-Info "Starting WSL2 to activate vEthernet adapter..."
+  wsl -d $WslDistro -- echo "wsl ready" 2>&1 | Out-Null
+  Start-Sleep -Seconds 4
+
   # Detect Windows WSL vEthernet adapter IP
   # (resolv.conf nameserver can return 10.255.255.254 on some WSL builds, which is not routable for portproxy)
   $winHostIp = (Get-NetIPAddress -AddressFamily IPv4 |
@@ -129,7 +135,7 @@ if ($EnableBrowser) {
     } |
     Select-Object -First 1 -ExpandProperty IPAddress)
   if (-not $winHostIp) {
-    throw "Could not detect WSL vEthernet IP address. Ensure WSL2 is running and the vEthernet (WSL) adapter is present."
+    throw "Could not detect WSL vEthernet IP address after starting WSL2. Check that WSL2 is installed correctly and try again."
   }
   Write-Info "WSL vEthernet adapter IP: $winHostIp"
 
