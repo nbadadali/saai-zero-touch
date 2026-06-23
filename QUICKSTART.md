@@ -116,8 +116,6 @@ Save and close (`Ctrl+X`, then `Y`, then `Enter` in nano).
 
 ```bash
 chmod +x deploy.sh healthcheck.sh
-sed -i 's/\r//' deploy.sh
-sed -i 's/\r//' config.env
 ./deploy.sh
 ```
 
