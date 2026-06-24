@@ -37,9 +37,35 @@ PASS=0; FAIL=0; WARN=0
 chk()  { echo "${GRN}[PASS]${RST} $*"; PASS=$((PASS+1)); }
 fail() { echo "${RED}[FAIL]${RST} $*"; FAIL=$((FAIL+1)); }
 warn() { echo "${YLW}[WARN]${RST} $*"; WARN=$((WARN+1)); }
+skip() { echo "${YLW}[SKIP]${RST} $*"; }
+
+# Poll an HTTP endpoint up to <tries> times (5s apart). Lets first-run services
+# (n8n does a one-time migration restart; start_period is 120s) finish coming up.
+wait_http() {
+  local url="$1" tries="${2:-1}" i
+  for ((i=0; i<tries; i++)); do
+    curl -fsS --connect-timeout 5 "${url}" >/dev/null 2>&1 && return 0
+    sleep 5
+  done
+  return 1
+}
+
+# Is browser automation (Edge CDP) actually enabled for this deployment?
+BROWSER_ENABLED="false"
+if [[ -f "${CONFIG_FILE}" ]]; then
+  BROWSER_ENABLED="$(bash -c "source '${CONFIG_FILE}' 2>/dev/null; echo \"\${ENABLE_BROWSER_AUTOMATION:-false}\"" 2>/dev/null || echo false)"
+fi
 
 # docker wrapper that survives a not-yet-active docker group in this shell
-dc() { if docker info &>/dev/null; then docker "$@"; else sg docker -c "docker $*"; fi; }
+dc() {
+  if docker info &>/dev/null; then
+    docker "$@"
+  else
+    # Preserve per-argument quoting through sg (a naive "docker $*" splits format
+    # strings like '{{if .State.Health}}...' on their spaces and returns empty).
+    sg docker -c "$(printf 'docker'; printf ' %q' "$@")"
+  fi
+}
 
 echo "══════════════════════════════════════════"
 echo "  Platform Health Check — $(date '+%Y-%m-%d %H:%M:%S')"
@@ -110,21 +136,28 @@ fi
 # ─── Endpoint checks ─────────────────────────────────────────────────────────
 echo
 echo "── Endpoints ──────────────────────────────"
-if curl -fsS --connect-timeout 5 http://127.0.0.1:3000/health >/dev/null 2>&1; then
+if wait_http http://127.0.0.1:3000/health 6; then
   chk "MCP server (:3000/health): responding"
 else
   fail "MCP server (:3000/health): no response  →  check: docker compose logs mcp-server"
 fi
-if curl -fsS --connect-timeout 5 http://127.0.0.1:5678 >/dev/null 2>&1; then
+# n8n needs longer on a fresh DB (one-time migration restart; start_period 120s).
+if wait_http http://127.0.0.1:5678 30; then
   chk "n8n UI (:5678): responding"
 else
-  fail "n8n UI (:5678): no response  →  check: docker compose logs n8n"
+  fail "n8n UI (:5678): no response after ~150s  →  check: docker compose logs n8n"
 fi
 
 # ─── Edge CDP (Windows host via WSL gateway) ─────────────────────────────────
 # Detect Windows host IP from the WSL default route (same IP the portproxy listens on).
-WIN_HOST_IP="$(ip route show default 2>/dev/null | awk '/default/ {print $3; exit}')"
-if [[ -z "${WIN_HOST_IP}" ]]; then
+if [[ "${BROWSER_ENABLED}" != "true" ]]; then
+  skip "Edge CDP: browser automation disabled (ENABLE_BROWSER_AUTOMATION=false) — not checked"
+  WIN_HOST_IP=""
+else
+  WIN_HOST_IP="$(ip route show default 2>/dev/null | awk '/default/ {print $3; exit}')"
+fi
+if [[ "${BROWSER_ENABLED}" == "true" ]]; then
+ if [[ -z "${WIN_HOST_IP}" ]]; then
   warn "Edge CDP: could not detect Windows host IP from WSL default route"
 else
   CDP_URL="http://${WIN_HOST_IP}:9222/json/version"
@@ -141,6 +174,8 @@ else
     fi
   fi
 fi
+
+fi  # end browser-enabled CDP check
 
 # ─── Summary ─────────────────────────────────────────────────────────────────
 echo

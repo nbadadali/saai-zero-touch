@@ -250,7 +250,16 @@ phase_docker() {
 }
 
 # docker wrapper that works even before the group membership is active in this shell
-dc() { if docker info &>/dev/null; then docker "$@"; else sg docker -c "docker $*"; fi; }
+dc() {
+  if docker info &>/dev/null; then
+    docker "$@"
+  else
+    # Preserve per-argument quoting through sg. A naive "docker $*" splits args
+    # that contain spaces (e.g. inspect format strings like '{{if .State.Health}}')
+    # and silently returns empty output.
+    sg docker -c "$(printf 'docker'; printf ' %q' "$@")"
+  fi
+}
 
 phase_node() {
   phase "node"
@@ -505,7 +514,20 @@ phase_stack() {
   # state). The generated password is stable across runs and named volumes
   # persist, so recreating is safe and idempotent.
   dc compose up -d --build --force-recreate --remove-orphans
-  log "waiting 20s for containers to settle"; sleep 20
+
+  # Wait for n8n to report healthy before moving on. The first run does a one-time
+  # DB migration that crashes and auto-restarts n8n once, so its healthcheck has a
+  # 120s start_period — without this wait, the validate phase checks the n8n UI too
+  # early and reports a false failure.
+  log "waiting for n8n to become healthy (first run includes a one-time migration restart)"
+  local n8n_ok=false _i
+  for _i in $(seq 1 36); do  # up to ~180s
+    if [[ "$(dc inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{end}}' diplomatic-expression-n8n 2>/dev/null)" == "healthy" ]]; then
+      n8n_ok=true; break
+    fi
+    sleep 5
+  done
+  if $n8n_ok; then ok "n8n healthy"; else warn "n8n not healthy after ~180s — validate/healthcheck will report details (docker compose logs n8n)"; fi
   dc compose ps
 }
 
