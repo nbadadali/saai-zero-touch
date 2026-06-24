@@ -629,6 +629,7 @@ echo "  • n8n UI        : http://localhost:5678"
 echo "  • health check  : bash ${SCRIPT_DIR}/healthcheck.sh"
 echo "  • re-run a phase: ./deploy.sh --only <phase>"
 echo "  • full log      : ${LOG_FILE}"
+echo "  • run docker yourself: newgrp docker   # (this shell only; automatic after reboot/new WSL session)"
 echo
 echo "  Windows host steps (run once, in PowerShell as Administrator):"
 echo "      .\\windows-setup.ps1 -WslDistro '${WSL_DISTRO}' -WslUser '${LINUX_USER}'"
