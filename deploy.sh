@@ -455,6 +455,12 @@ phase_env_file() {
   set_env_var "REDIS_PASSWORD"         "${REDIS_PASSWORD}"         "${ENV_DEST}"
   [[ -n "${N8N_API_KEY}" ]] && set_env_var "N8N_API_KEY" "${N8N_API_KEY}" "${ENV_DEST}"
 
+  # GUARD: a database container created with an EMPTY password initializes an
+  # unusable volume ("Database is uninitialized ... POSTGRES_PASSWORD not set")
+  # and crash-loops forever. Fail loudly here instead of much later in the stack.
+  [[ -n "${DB_POSTGRESDB_PASSWORD}" ]] || die "DB_POSTGRESDB_PASSWORD resolved empty — secret generation failed (check openssl/urandom). Aborting before stack."
+  [[ -n "${PGVECTOR_PASSWORD}"      ]] || die "PGVECTOR_PASSWORD resolved empty — secret generation failed (check openssl/urandom). Aborting before stack."
+
   chmod 600 "${ENV_DEST}"
   ok ".env written and locked to 0600 (${ENV_DEST})"
 }
@@ -467,10 +473,38 @@ phase_stack() {
     echo "   ${YLW}[dry-run]${RST} dc compose pull && dc compose up -d --build"
     return 0
   fi
+  # GUARD 1: .env must exist. Protects against running '--from stack' (or --only
+  # stack) before env_file has generated secrets — that creates Postgres with an
+  # empty password and an unusable, uninitialized data volume.
+  [[ -f "${ENV_DEST}" ]] || die ".env missing at ${ENV_DEST}. Run a full ./deploy.sh, or ./deploy.sh --only env_file first. Never run '--from stack' before env_file."
+
+  # ROOT-CAUSE FIX: phases run in a subshell (see the '<phase> | tee' loop), and
+  # config.env was sourced with 'set -a', which EXPORTS empty secret values into
+  # the environment on a fresh deploy. env_file writes the real generated
+  # passwords to .env, but its in-subshell variable assignments never reach this
+  # environment. Docker Compose gives environment variables PRECEDENCE over the
+  # .env file, so those empty exports would shadow the real passwords in .env and
+  # Postgres/pgvector would start with an EMPTY password. Re-load .env here so the
+  # environment matches the file before any container is created.
+  set -a
+  # shellcheck disable=SC1090
+  source "${ENV_DEST}"
+  set +a
+
+  # GUARD 2: the Postgres password must actually resolve from .env. This is the
+  # #1 fresh-deploy failure mode — verify it BEFORE any container is created.
+  local pgpw
+  pgpw="$(dc compose config 2>/dev/null | awk -F'POSTGRES_PASSWORD:' 'NF>1{gsub(/[[:space:]"]/,"",$2); print $2; exit}')"
+  [[ -n "${pgpw}" ]] || die "POSTGRES_PASSWORD did not resolve from ${ENV_DEST}. Run: ./deploy.sh --only env_file, then retry."
+
   log "pulling images (may take a few minutes)"
   dc compose pull 2>/dev/null || warn "image pull had warnings — continuing"
   log "starting stack"
-  dc compose up -d --build
+  # --force-recreate self-heals any container left from a prior aborted run that
+  # was created before .env existed (the empty-password / uninitialized-volume
+  # state). The generated password is stable across runs and named volumes
+  # persist, so recreating is safe and idempotent.
+  dc compose up -d --build --force-recreate --remove-orphans
   log "waiting 20s for containers to settle"; sleep 20
   dc compose ps
 }
