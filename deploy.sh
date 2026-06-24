@@ -210,24 +210,40 @@ LOG=/var/log/saai-boot.log
 exec >> "\$LOG" 2>&1
 echo "===== saai-boot \$(date) ====="
 
-# 1) Ensure the docker daemon is up.
+# 1) Ensure the docker daemon is up AND stable. At cold boot dockerd briefly
+#    accepts then resets connections, which makes a single 'compose up' fail.
 systemctl start docker.socket docker 2>/dev/null
-i=0; until docker info >/dev/null 2>&1; do i=\$((i+1)); [ "\$i" -ge 60 ] && break; sleep 2; done
-echo "docker reachable after ~\$((i*2))s (is-active=\$(systemctl is-active docker 2>/dev/null))"
+i=0; until docker info >/dev/null 2>&1; do i=\$((i+1)); [ "\$i" -ge 90 ] && break; sleep 2; done
+stable=0; j=0
+while [ "\$j" -lt 30 ]; do
+  j=\$((j+1))
+  if docker ps >/dev/null 2>&1; then stable=\$((stable+1)); [ "\$stable" -ge 3 ] && break; else stable=0; fi
+  sleep 2
+done
+echo "docker reachable after ~\$((i*2))s; stable streak=\$stable (is-active=\$(systemctl is-active docker 2>/dev/null))"
 
-# 2) Bring the n8n docker stack up DIRECTLY as root — independent of the user
-#    systemd manager, which is unreliable at non-interactive WSL boot.
+# 2) Bring the n8n docker stack up DIRECTLY as root, WITH RETRIES — a transient
+#    daemon connection reset at boot must not leave the stack half-started.
 REPO="\$(cat "${HOME_DIR}/.saai-repo-path" 2>/dev/null)"
 echo "repo dir: [\$REPO]"
 if [ -n "\$REPO" ] && [ -d "\$REPO" ]; then
-  (cd "\$REPO" && docker compose up -d) && echo "compose up: OK" || echo "compose up: FAILED"
+  a=0; rc=1
+  while [ "\$a" -lt 5 ]; do
+    a=\$((a+1)); echo "compose up attempt \$a"
+    if (cd "\$REPO" && docker compose up -d); then rc=0; echo "compose up: OK (attempt \$a)"; break; fi
+    echo "compose up attempt \$a failed; retry in 15s"; sleep 15
+  done
+  [ "\$rc" -ne 0 ] && echo "compose up: FAILED after \$a attempts"
 else
   echo "repo dir missing — cannot start stack"
 fi
 
-# 3) Start the OpenClaw gateway (and the stack unit) as the user via a real login
-#    session — this mirrors the interactive 'open Ubuntu' path that is known to work.
-su - "${LINUX_USER}" -c "systemctl --user start openclaw-gateway.service n8n-stack.service" && echo "user units: started" || echo "user units: start failed"
+# 3) Start the OpenClaw gateway as the user. 'su -' alone does NOT set
+#    XDG_RUNTIME_DIR in WSL, so first start the user's systemd manager (a system
+#    service), then start the gateway with XDG_RUNTIME_DIR explicitly set.
+UIDN="\$(id -u "${LINUX_USER}" 2>/dev/null)"
+systemctl start "user@\${UIDN}.service" 2>/dev/null && echo "user manager: started" || echo "user manager: start rc=\$?"
+su - "${LINUX_USER}" -c "XDG_RUNTIME_DIR=/run/user/\${UIDN} systemctl --user start openclaw-gateway.service n8n-stack.service" 2>&1 && echo "user units: started" || echo "user units: start failed"
 
 echo "===== saai-boot done \$(date) ====="
 BOOTEOF
