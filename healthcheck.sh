@@ -154,7 +154,10 @@ if [[ "${BROWSER_ENABLED}" != "true" ]]; then
   skip "Edge CDP: browser automation disabled (ENABLE_BROWSER_AUTOMATION=false) — not checked"
   WIN_HOST_IP=""
 else
-  WIN_HOST_IP="$(ip route show default 2>/dev/null | awk '/default/ {print $3; exit}')"
+  # Windows host = the WSL default gateway. Exclude docker0/bridge/veth interfaces
+  # whose gateway (e.g. 172.17.0.1 = docker0) is NOT the Windows host — that is the
+  # same vEthernet (WSL) IP the portproxy listens on in windows-setup.ps1.
+  WIN_HOST_IP="$(ip route show default 2>/dev/null | awk '$0 !~ /docker0|br-|veth/ {print $3; exit}')"
 fi
 if [[ "${BROWSER_ENABLED}" == "true" ]]; then
  if [[ -z "${WIN_HOST_IP}" ]]; then
