@@ -571,7 +571,14 @@ phase_stack() {
   # was created before .env existed (the empty-password / uninitialized-volume
   # state). The generated password is stable across runs and named volumes
   # persist, so recreating is safe and idempotent.
+  set +e
   dc compose up -d --build --force-recreate --remove-orphans
+  compose_status=$?
+  set -e
+  
+  if [[ $compose_status -ne 0 ]]; then
+      warn "docker compose returned non-zero, likely because n8n is still starting/migrating. Continuing to health wait..."
+  fi
 
   # Wait for n8n to report healthy before moving on. The first run does a one-time
   # DB migration that crashes and auto-restarts n8n once, so its healthcheck has a
