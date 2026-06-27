@@ -62,6 +62,7 @@ N8N_ENCRYPTION_KEY=""; N8N_JWT_SECRET=""; DB_POSTGRESDB_PASSWORD=""
 PGVECTOR_PASSWORD=""; MCP_AUTH_TOKEN=""; N8N_API_KEY=""
 WEBHOOK_URL="http://localhost:5678"; N8N_EDITOR_BASE_URL="http://localhost:5678"
 GENERIC_TIMEZONE="Asia/Dubai"; REDIS_PASSWORD=""
+N8N_IMAGE_TAG="2.28.0"; N8N_STARTUP_TIMEOUT_SECONDS="600"
 
 DRY_RUN=false
 
@@ -520,6 +521,7 @@ phase_env_file() {
   set_env_var "N8N_EDITOR_BASE_URL"    "${N8N_EDITOR_BASE_URL}"    "${ENV_DEST}"
   set_env_var "GENERIC_TIMEZONE"       "${GENERIC_TIMEZONE}"       "${ENV_DEST}"
   set_env_var "REDIS_PASSWORD"         "${REDIS_PASSWORD}"         "${ENV_DEST}"
+  set_env_var "N8N_IMAGE_TAG"          "${N8N_IMAGE_TAG}"          "${ENV_DEST}"
   [[ -n "${N8N_API_KEY}" ]] && set_env_var "N8N_API_KEY" "${N8N_API_KEY}" "${ENV_DEST}"
 
   # GUARD: a database container created with an EMPTY password initializes an
@@ -530,6 +532,51 @@ phase_env_file() {
 
   chmod 600 "${ENV_DEST}"
   ok ".env written and locked to 0600 (${ENV_DEST})"
+}
+
+collect_stack_diagnostics() {
+  local reason="${1:-stack failure}" svc cid
+  echo
+  warn "collecting stack diagnostics: ${reason}"
+  echo "── Docker versions ─────────────────────────"
+  dc version 2>&1 || true
+  dc compose version 2>&1 || true
+  echo "── Expected services ───────────────────────"
+  dc compose config --services 2>&1 || true
+  echo "── Resolved images ─────────────────────────"
+  dc compose config --images 2>&1 || true
+  echo "── Container status ────────────────────────"
+  dc compose ps -a 2>&1 || true
+  echo "── Per-service state and recent logs ───────"
+  while IFS= read -r svc; do
+    [[ -n "${svc}" ]] || continue
+    echo "### ${svc}"
+    cid="$(dc compose ps -a -q "${svc}" 2>/dev/null | head -1 || true)"
+    if [[ -z "${cid}" ]]; then
+      echo "container: not created"
+      continue
+    fi
+    dc inspect -f 'container={{.Name}} state={{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} restarts={{.RestartCount}} exit={{.State.ExitCode}} error={{json .State.Error}}' "${cid}" 2>&1 || true
+    dc compose logs --no-color --tail=120 "${svc}" 2>&1 || true
+  done < <(dc compose config --services 2>/dev/null || true)
+  echo "── End stack diagnostics ───────────────────"
+  echo
+}
+
+wait_for_n8n_health() {
+  local timeout="${N8N_STARTUP_TIMEOUT_SECONDS}" deadline health state
+  [[ "${timeout}" =~ ^[0-9]+$ ]] && (( timeout > 0 )) || timeout=600
+  deadline=$((SECONDS + timeout))
+  while (( SECONDS < deadline )); do
+    health="$(dc inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{end}}' diplomatic-expression-n8n 2>/dev/null || true)"
+    state="$(dc inspect -f '{{.State.Status}}' diplomatic-expression-n8n 2>/dev/null || true)"
+    if [[ "${health}" == "healthy" ]]; then
+      return 0
+    fi
+    printf '   n8n state=%s health=%s; waiting...\n' "${state:-not-created}" "${health:-none}"
+    sleep 5
+  done
+  return 1
 }
 
 phase_stack() {
@@ -566,33 +613,57 @@ phase_stack() {
 
   log "pulling images (may take a few minutes)"
   dc compose pull 2>/dev/null || warn "image pull had warnings — continuing"
-  log "starting stack"
-  # --force-recreate self-heals any container left from a prior aborted run that
-  # was created before .env existed (the empty-password / uninitialized-volume
-  # state). The generated password is stable across runs and named volumes
-  # persist, so recreating is safe and idempotent.
-  set +e
-  dc compose up -d --build --force-recreate --remove-orphans
-  compose_status=$?
-  set -e
-  
-  if [[ $compose_status -ne 0 ]]; then
-      warn "docker compose returned non-zero, likely because n8n is still starting/migrating. Continuing to health wait..."
+  # A fresh n8n database must be migrated by one process. Starting the main
+  # process and workers together can make multiple n8n processes race through
+  # the same migration, producing errors such as "constraint already exists".
+  # Stop dependent application services, migrate with main n8n only, then start
+  # the complete stack after the main process is healthy.
+  log "stopping n8n workers and MCP before the migration-safe startup"
+  if ! dc compose stop n8n-worker-1 n8n-worker-2 mcp-server >/dev/null 2>&1; then
+    warn "one or more dependent services were not present yet (expected on a fresh install)"
   fi
 
-  # Wait for n8n to report healthy before moving on. The first run does a one-time
-  # DB migration that crashes and auto-restarts n8n once, so its healthcheck has a
-  # 120s start_period — without this wait, the validate phase checks the n8n UI too
-  # early and reports a false failure.
-  log "waiting for n8n to become healthy (first run includes a one-time migration restart)"
-  local n8n_ok=false _i
-  for _i in $(seq 1 36); do  # up to ~180s
-    if [[ "$(dc inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{end}}' diplomatic-expression-n8n 2>/dev/null)" == "healthy" ]]; then
-      n8n_ok=true; break
+  log "starting databases and the main n8n process"
+  # --force-recreate self-heals containers left by an earlier aborted run. Named
+  # volumes and generated passwords remain stable, so persisted data is retained.
+  if ! dc compose up -d --build --force-recreate --remove-orphans postgres redis pgvector n8n; then
+    collect_stack_diagnostics "database/main n8n startup command failed"
+    die "Could not start the database and main n8n services. Diagnostics are in ${LOG_FILE}."
+  fi
+
+  log "waiting up to ${N8N_STARTUP_TIMEOUT_SECONDS}s for the main n8n process to become healthy"
+  if wait_for_n8n_health; then
+    ok "main n8n process is healthy; database migrations are complete"
+  else
+    collect_stack_diagnostics "n8n did not become healthy within ${N8N_STARTUP_TIMEOUT_SECONDS}s"
+    die "n8n startup timed out. Diagnostics are in ${LOG_FILE}."
+  fi
+
+  log "starting workers, MCP, and any remaining Compose services"
+  if ! dc compose up -d --build --remove-orphans; then
+    collect_stack_diagnostics "full stack startup failed after n8n became healthy"
+    die "The full stack did not start. Diagnostics are in ${LOG_FILE}."
+  fi
+
+  # Confirm that every service declared by Compose has a running container. This
+  # catches dependency-skipped services (notably MCP) before final validation.
+  local svc cid state all_running=true
+  while IFS= read -r svc; do
+    [[ -n "${svc}" ]] || continue
+    cid="$(dc compose ps -a -q "${svc}" 2>/dev/null | head -1 || true)"
+    state=""
+    [[ -n "${cid}" ]] && state="$(dc inspect -f '{{.State.Status}}' "${cid}" 2>/dev/null || true)"
+    if [[ "${state}" != "running" ]]; then
+      warn "${svc}: expected running, found ${state:-no container}"
+      all_running=false
     fi
-    sleep 5
-  done
-  if $n8n_ok; then ok "n8n healthy"; else warn "n8n not healthy after ~180s — validate/healthcheck will report details (docker compose logs n8n)"; fi
+  done < <(dc compose config --services 2>/dev/null || true)
+
+  if ! $all_running; then
+    collect_stack_diagnostics "one or more Compose services are not running"
+    die "Stack startup was incomplete. Diagnostics are in ${LOG_FILE}."
+  fi
+  ok "all Compose services are running"
   dc compose ps
 }
 
