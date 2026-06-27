@@ -96,6 +96,10 @@ chmod +x deploy.sh healthcheck.sh
 That single command runs all phases: packages → wsl_config → docker → node →
 openclaw → gateway → (browser) → repo → env_file → stack → autostart → validate.
 
+During the gateway phase, `deploy.sh` generates a stable
+`OPENCLAW_GATEWAY_TOKEN` when blank, stores it in the gitignored `config.env`,
+and uses it for authenticated CLI health checks across gateway restarts.
+
 When it finishes, it runs the health check automatically and prints the n8n URL.
 One MCP readiness warning is expected until the n8n API key is created.
 

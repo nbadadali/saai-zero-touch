@@ -12,6 +12,7 @@
 # =============================================================================
 
 set -uo pipefail
+export PATH="$HOME/.npm-global/bin:$PATH"
 
 if [[ -t 1 ]]; then
   RED=$'\033[0;31m'; GRN=$'\033[0;32m'; YLW=$'\033[1;33m'; RST=$'\033[0m'
@@ -54,10 +55,12 @@ wait_http() {
 BROWSER_ENABLED="false"
 WINDOWS_CDP_PORT="9222"
 OPENCLAW_BROWSER_PROFILE="windows-edge"
+OPENCLAW_GATEWAY_TOKEN=""
 if [[ -f "${CONFIG_FILE}" ]]; then
   BROWSER_ENABLED="$(bash -c "source '${CONFIG_FILE}' 2>/dev/null; echo \"\${ENABLE_BROWSER_AUTOMATION:-false}\"" 2>/dev/null || echo false)"
   WINDOWS_CDP_PORT="$(bash -c "source '${CONFIG_FILE}' 2>/dev/null; echo \"\${WINDOWS_CDP_PORT:-9222}\"" 2>/dev/null || echo 9222)"
   OPENCLAW_BROWSER_PROFILE="$(bash -c "source '${CONFIG_FILE}' 2>/dev/null; echo \"\${OPENCLAW_BROWSER_PROFILE:-windows-edge}\"" 2>/dev/null || echo windows-edge)"
+  OPENCLAW_GATEWAY_TOKEN="$(bash -c "source '${CONFIG_FILE}' 2>/dev/null; printf '%s' \"\${OPENCLAW_GATEWAY_TOKEN:-}\"" 2>/dev/null || true)"
 fi
 
 # docker wrapper that survives a not-yet-active docker group in this shell
@@ -184,8 +187,10 @@ else
     fi
   fi
 
-  if command -v openclaw >/dev/null 2>&1 && \
-     openclaw browser --browser-profile "${OPENCLAW_BROWSER_PROFILE}" doctor >/dev/null 2>&1; then
+  if [[ -z "${OPENCLAW_GATEWAY_TOKEN}" ]]; then
+    fail "OpenClaw browser profile '${OPENCLAW_BROWSER_PROFILE}': gateway token missing"
+  elif command -v openclaw >/dev/null 2>&1 && \
+     openclaw browser --token "${OPENCLAW_GATEWAY_TOKEN}" --browser-profile "${OPENCLAW_BROWSER_PROFILE}" doctor >/dev/null 2>&1; then
     chk "OpenClaw browser profile '${OPENCLAW_BROWSER_PROFILE}': ready"
   else
     fail "OpenClaw browser profile '${OPENCLAW_BROWSER_PROFILE}': doctor failed"

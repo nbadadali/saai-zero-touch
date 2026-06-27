@@ -103,7 +103,7 @@ Only two things need your attention on a fresh install:
 | `WSL_DISTRO` | `Ubuntu-22.04` (match what you used in Step 2) |
 
 **Everything else can stay as-is for a standard install:**
-- Secrets (`N8N_ENCRYPTION_KEY`, `DB_POSTGRESDB_PASSWORD`, etc.) — leave blank, deploy.sh generates strong random values automatically
+- Secrets (`OPENCLAW_GATEWAY_TOKEN`, `N8N_ENCRYPTION_KEY`, `DB_POSTGRESDB_PASSWORD`, etc.) — leave blank; deploy.sh generates and persists strong random values automatically
 - `WEBHOOK_URL` / `N8N_EDITOR_BASE_URL` — leave as `http://localhost:5678` for local installs
 - `OPENCLAW_VERSION` — leave blank for latest
 
