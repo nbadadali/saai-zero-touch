@@ -64,7 +64,8 @@ N8N_ENCRYPTION_KEY=""; N8N_JWT_SECRET=""; DB_POSTGRESDB_PASSWORD=""
 PGVECTOR_PASSWORD=""; MCP_AUTH_TOKEN=""; N8N_API_KEY=""
 WEBHOOK_URL="http://localhost:5678"; N8N_EDITOR_BASE_URL="http://localhost:5678"
 GENERIC_TIMEZONE="Asia/Dubai"; REDIS_PASSWORD=""
-N8N_IMAGE_TAG="2.28.0"; N8N_STARTUP_TIMEOUT_SECONDS="600"
+N8N_IMAGE_TAG="2.28.0"; HOST_BIND_ADDRESS="127.0.0.1"
+N8N_STARTUP_TIMEOUT_SECONDS="600"
 
 DRY_RUN=false
 
@@ -604,6 +605,7 @@ phase_env_file() {
   set_env_var "GENERIC_TIMEZONE"       "${GENERIC_TIMEZONE}"       "${ENV_DEST}"
   set_env_var "REDIS_PASSWORD"         "${REDIS_PASSWORD}"         "${ENV_DEST}"
   set_env_var "N8N_IMAGE_TAG"          "${N8N_IMAGE_TAG}"          "${ENV_DEST}"
+  set_env_var "HOST_BIND_ADDRESS"       "${HOST_BIND_ADDRESS}"       "${ENV_DEST}"
   [[ -n "${N8N_API_KEY}" ]] && set_env_var "N8N_API_KEY" "${N8N_API_KEY}" "${ENV_DEST}"
 
   # GUARD: a database container created with an EMPTY password initializes an
@@ -656,6 +658,34 @@ wait_for_n8n_health() {
       return 0
     fi
     printf '   n8n state=%s health=%s; waiting...\n' "${state:-not-created}" "${health:-none}"
+    sleep 5
+  done
+  return 1
+}
+
+wait_for_stack_health() {
+  local timeout="${1:-180}" deadline svc cid state health all_ready
+  [[ "${timeout}" =~ ^[0-9]+$ ]] && (( timeout > 0 )) || timeout=180
+  deadline=$((SECONDS + timeout))
+
+  while (( SECONDS < deadline )); do
+    all_ready=true
+    while IFS= read -r svc; do
+      [[ -n "${svc}" ]] || continue
+      cid="$(dc compose ps -a -q "${svc}" 2>/dev/null | head -1 || true)"
+      state=""
+      health="none"
+      if [[ -n "${cid}" ]]; then
+        state="$(dc inspect -f '{{.State.Status}}' "${cid}" 2>/dev/null || true)"
+        health="$(dc inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "${cid}" 2>/dev/null || true)"
+      fi
+      if [[ "${state}" != "running" || ( "${health}" != "healthy" && "${health}" != "none" ) ]]; then
+        all_ready=false
+        break
+      fi
+    done < <(dc compose config --services 2>/dev/null || true)
+
+    $all_ready && return 0
     sleep 5
   done
   return 1
@@ -727,25 +757,12 @@ phase_stack() {
     die "The full stack did not start. Diagnostics are in ${LOG_FILE}."
   fi
 
-  # Confirm that every service declared by Compose has a running container. This
-  # catches dependency-skipped services (notably MCP) before final validation.
-  local svc cid state all_running=true
-  while IFS= read -r svc; do
-    [[ -n "${svc}" ]] || continue
-    cid="$(dc compose ps -a -q "${svc}" 2>/dev/null | head -1 || true)"
-    state=""
-    [[ -n "${cid}" ]] && state="$(dc inspect -f '{{.State.Status}}' "${cid}" 2>/dev/null || true)"
-    if [[ "${state}" != "running" ]]; then
-      warn "${svc}: expected running, found ${state:-no container}"
-      all_running=false
-    fi
-  done < <(dc compose config --services 2>/dev/null || true)
-
-  if ! $all_running; then
-    collect_stack_diagnostics "one or more Compose services are not running"
+  log "waiting up to 180s for all Compose health checks"
+  if ! wait_for_stack_health 180; then
+    collect_stack_diagnostics "one or more Compose services did not become healthy"
     die "Stack startup was incomplete. Diagnostics are in ${LOG_FILE}."
   fi
-  ok "all Compose services are running"
+  ok "all Compose services are running and healthy"
   dc compose ps
 }
 

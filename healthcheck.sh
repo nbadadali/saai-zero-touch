@@ -147,6 +147,15 @@ if wait_http http://127.0.0.1:3000/health 6; then
 else
   fail "MCP server (:3000/health): no response  →  check: docker compose logs mcp-server"
 fi
+
+MCP_N8N_API_KEY="$(grep '^N8N_API_KEY=' "${REPO_DIR}/.env" 2>/dev/null | head -1 | cut -d= -f2- || true)"
+if [[ -z "${MCP_N8N_API_KEY}" ]]; then
+  warn "MCP readiness: N8N_API_KEY is not configured yet  →  create it in n8n, update config.env, then recreate mcp-server"
+elif wait_http http://127.0.0.1:3000/ready 6; then
+  chk "MCP readiness (:3000/ready): n8n API authenticated"
+else
+  fail "MCP readiness (:3000/ready): failed  →  verify N8N_API_KEY and check docker compose logs mcp-server"
+fi
 # n8n needs longer on a fresh DB (one-time migration restart; start_period 120s).
 if wait_http http://127.0.0.1:5678 30; then
   chk "n8n UI (:5678): responding"

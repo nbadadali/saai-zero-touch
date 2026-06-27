@@ -1,7 +1,8 @@
 # SAAI Stack — Quickstart (Fresh Machine)
 
 Deploy the OpenClaw + n8n AI orchestration stack on a new Windows laptop in
-under 30 minutes. You will touch the keyboard exactly **3 times**.
+under 30 minutes. Initial n8n owner and API-key creation remains a required
+post-deployment step.
 
 ---
 
@@ -122,7 +123,7 @@ The script runs all phases automatically:
 
 ```
 packages → wsl_config → docker → node → openclaw → gateway
-→ repo → env_file → stack → autostart → validate
+→ browser → repo → env_file → stack → autostart → validate
 ```
 
 Estimated time: **10–20 minutes** on a typical broadband connection.
@@ -137,19 +138,23 @@ When it completes, the health check runs automatically and prints:
 [PASS] Gateway port 18789: listening
 [PASS] User lingering: enabled
 [PASS] Docker daemon: reachable
-[PASS] Compose file: found
 [PASS] postgres: running (healthy)
 [PASS] redis: running (healthy)
-[PASS] n8n: running
-[PASS] n8n-worker: running (x2)
-[PASS] mcp-server: running
+[PASS] n8n: running (healthy)
+[PASS] n8n-worker-1: running (healthy)
+[PASS] n8n-worker-2: running (healthy)
+[PASS] mcp-server: running (healthy)
 [PASS] MCP server (:3000/health): responding
+[WARN] MCP readiness: N8N_API_KEY is not configured yet
 [PASS] n8n UI (:5678): responding
 ══════════════════════════════════════════
-  12 pass / 0 fail / 0 warn
+  0 fail / 1 warn
   Platform health looks good.
 ══════════════════════════════════════════
 ```
+
+The MCP readiness warning is expected until the first-login steps below are
+completed. It does not mean the deployment failed.
 
 **Open n8n:** http://localhost:5678
 
@@ -165,10 +170,11 @@ When it completes, the health check runs automatically and prints:
    nano ~/saai-deploy/config.env   # set N8N_API_KEY="n8n_api_..."
    ./deploy.sh --only env_file
    ```
-5. Restart the stack to pick up the key:
+5. Recreate only the MCP service so it receives the key, then validate:
    ```bash
    cd ~/diplomatic-expression-docker
-   docker compose restart n8n n8n-worker
+   docker compose up -d --force-recreate mcp-server
+   bash ~/saai-deploy/healthcheck.sh
    ```
 
 ---
@@ -302,7 +308,7 @@ bash ~/saai-deploy/healthcheck.sh   # validate health anytime
 Use this at the end of every client deployment:
 
 - [ ] `./deploy.sh` completed with no FAIL lines
-- [ ] `healthcheck.sh` shows 0 fail / 0 warn
+- [ ] After the n8n API key is configured, `healthcheck.sh` shows 0 fail / 0 warn
 - [ ] http://localhost:5678 loads and login works
 - [ ] n8n API key generated and added to config.env
 - [ ] Machine rebooted and stack came back up automatically

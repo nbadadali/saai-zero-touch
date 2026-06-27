@@ -22,17 +22,19 @@ Three things are imposed by Windows + WSL2 and cannot be scripted away:
    They are re-applied automatically at each login by a Scheduled Task, but that
    task must be registered once (done by `windows-setup.ps1`).
 
-Everything else **is** automated and idempotent. Realistic human touchpoints: **3**.
+Everything else **is** automated and idempotent. Realistic human touchpoints:
+the three deployment steps plus one n8n first-login/API-key step.
 
 ---
 
-## The 3 touchpoints
+## Deployment touchpoints
 
 | # | Where | Action | One-time? |
 |---|-------|--------|-----------|
 | 1 | Windows PowerShell (Admin) | `wsl --install` **only if WSL2 isn't present**, then reboot | yes |
 | 2 | Windows PowerShell (Admin) | run `windows-setup.ps1 -EnableBrowser` | yes |
 | 3 | WSL2 Ubuntu | fill `config.env`, run `./deploy.sh` | yes |
+| 4 | n8n UI + WSL2 | create the owner and API key, update `config.env`, recreate MCP | yes |
 
 After this, every reboot brings the whole stack back up on its own.
 
@@ -58,7 +60,7 @@ In **PowerShell as Administrator**:
 
 ```powershell
 wsl --list --verbose      # if Ubuntu shows VERSION 2, skip to Touchpoint 2
-wsl --install -d Ubuntu   # otherwise install, then REBOOT Windows
+wsl --install -d Ubuntu-22.04   # otherwise install, then REBOOT Windows
 ```
 
 After reboot, open Ubuntu once to create your Linux user.
@@ -84,7 +86,7 @@ Open Ubuntu. Get this folder into WSL (it may already be reachable under
 ```bash
 cp -r /mnt/c/path/to/saai-deploy ~/saai-deploy && cd ~/saai-deploy
 cp config.env.example config.env
-nano config.env          # set LINUX_USER, leave secrets blank to auto-generate
+nano config.env          # verify WSL_DISTRO; LINUX_USER may remain blank
 chmod +x deploy.sh healthcheck.sh
 ./deploy.sh
 ```
@@ -93,6 +95,22 @@ That single command runs all phases: packages → wsl_config → docker → node
 openclaw → gateway → (browser) → repo → env_file → stack → autostart → validate.
 
 When it finishes, it runs the health check automatically and prints the n8n URL.
+One MCP readiness warning is expected until the n8n API key is created.
+
+### Complete MCP configuration after first login
+
+1. Open `http://localhost:5678` and create the n8n owner account.
+2. Open **Settings -> API** and create an API key.
+3. Set `N8N_API_KEY` in `~/saai-deploy/config.env`.
+4. Run:
+
+```bash
+cd ~/saai-deploy
+./deploy.sh --only env_file
+cd ~/diplomatic-expression-docker
+docker compose up -d --force-recreate mcp-server
+bash ~/saai-deploy/healthcheck.sh
+```
 
 ---
 
@@ -137,13 +155,16 @@ bash ~/saai-deploy/healthcheck.sh
 | OpenClaw gateway | ✅ | `openclaw-gateway.service` systemd user service + linger |
 | n8n Docker stack | ✅ | `n8n-stack.service` systemd user service + linger |
 | `.wslconfig` / systemd | ✅ | written once by `windows-setup.ps1` |
-| Windows Startup launcher | ✅ | `windows-setup.ps1` |
 | WSL wake-up trigger | ✅ | `OpenClaw-Stack-DelayedStart` Scheduled Task (fires 90 s after logon) |
 | portproxy (9222) | ✅ → refreshed | Windows IP Helper + Scheduled Task |
 | Edge dedicated CDP profile | ✅ → relaunched | `OpenClaw-CDP-Autostart` task |
 | Windows host alias in WSL | ✅ → refreshed | `/usr/local/bin/saai-boot.sh` |
 
-**How the startup chain works:** Windows fires the Scheduled Task 90 seconds after login, which runs `wsl.exe … sleep 180` — keeping the WSL2 VM alive for 3 minutes. During that window, systemd (with linger enabled) starts `openclaw-gateway.service` and `n8n-stack.service`. Once the Docker containers are running they keep the WSL VM alive indefinitely.
+**How the startup chain works:** Windows fires the Scheduled Task 90 seconds
+after login, which runs `wsl.exe ... sleep 300`, keeping the WSL2 VM alive for
+5 minutes. During that window, systemd with linger starts
+`openclaw-gateway.service` and `n8n-stack.service`. Compose waits for the main
+n8n service to finish database migrations before starting its workers.
 
 ---
 

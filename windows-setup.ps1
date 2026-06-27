@@ -364,3 +364,4 @@ Write-Host "    1. Open $WslDistro"
 Write-Host "    2. Clone saai-zero-touch and run: ./deploy.sh"
 Write-Host "    3. Validate: bash ~/saai-deploy/healthcheck.sh"
 Write-Host ""
+
