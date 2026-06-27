@@ -184,18 +184,19 @@ if ($EnableBrowser) {
   wsl -d $WslDistro -- echo "wsl ready" 2>&1 | Out-Null
   Start-Sleep -Seconds 4
 
-  # Detect the Windows side of the WSL virtual adapter. The interface is used to
-  # scope the firewall rule so CDP is not exposed through Wi-Fi or Ethernet.
-  $wslAdapter = Get-NetIPAddress -AddressFamily IPv4 |
-    Where-Object {
-      $_.InterfaceAlias -like "vEthernet (WSL*" -and
-      $_.IPAddress -notlike "169.*"
-    } |
+  # Derive the Windows-side gateway from WSL's default route, then resolve the
+  # matching Windows adapter. This is the same address deploy.sh uses and avoids
+  # selecting the wrong vEthernet adapter when several Hyper-V adapters exist.
+  $winHostIp = wsl -d $WslDistro -- sh -lc "ip route show default | head -n 1 | cut -d ' ' -f 3" 2>$null | Select-Object -First 1
+  if (-not $winHostIp) {
+    throw "Could not detect the Windows host IP from the WSL default route."
+  }
+  $winHostIp = $winHostIp.Trim()
+  $wslAdapter = Get-NetIPAddress -AddressFamily IPv4 -IPAddress $winHostIp -ErrorAction SilentlyContinue |
     Select-Object -First 1
   if (-not $wslAdapter) {
-    throw "Could not detect the WSL vEthernet adapter after starting WSL2."
+    throw "Could not find the Windows adapter for WSL gateway $winHostIp."
   }
-  $winHostIp = $wslAdapter.IPAddress
   $wslInterface = $wslAdapter.InterfaceAlias
   Write-Info "WSL adapter: $wslInterface ($winHostIp)"
 
@@ -204,17 +205,28 @@ if ($EnableBrowser) {
   Start-Service -Name iphlpsvc
   Write-Ok "Windows IP Helper service is running"
 
-  # Bind the proxy independently of the current WSL gateway IP. The firewall
-  # rule below limits access to the WSL virtual interface only.
-  netsh interface portproxy delete v4tov4 listenport=$CdpPort listenaddress=0.0.0.0 2>$null | Out-Null
-  netsh interface portproxy delete v4tov4 listenport=$CdpPort listenaddress=$winHostIp 2>$null | Out-Null
+  # Edge owns 127.0.0.1:$CdpPort. A wildcard 0.0.0.0 listener conflicts with that
+  # socket, so portproxy must bind only to the current Windows-side WSL address.
+  # Remember the last address so an obsolete rule can be removed after an IP
+  # change. The scheduled task repeats this refresh after every Windows logon.
+  $openClawStateDir = Join-Path $env:LOCALAPPDATA "OpenClaw"
+  New-Item -ItemType Directory -Force -Path $openClawStateDir | Out-Null
+  $proxyStateFile = Join-Path $openClawStateDir "cdp-listen-address.txt"
+  $previousProxyIp = if (Test-Path $proxyStateFile) { (Get-Content $proxyStateFile -Raw).Trim() } else { "" }
+  @("0.0.0.0", $previousProxyIp, $winHostIp) |
+    Where-Object { $_ } |
+    Select-Object -Unique |
+    ForEach-Object {
+      netsh interface portproxy delete v4tov4 listenport=$CdpPort listenaddress=$_ 2>$null | Out-Null
+    }
   netsh interface portproxy add v4tov4 `
     listenport=$CdpPort `
-    listenaddress=0.0.0.0 `
+    listenaddress=$winHostIp `
     connectport=$CdpPort `
     connectaddress=127.0.0.1 | Out-Null
   if ($LASTEXITCODE -ne 0) { throw "Could not create the Edge CDP portproxy." }
-  Write-Ok "portproxy: WSL interface port $CdpPort -> 127.0.0.1:$CdpPort"
+  Set-Content -Path $proxyStateFile -Value $winHostIp -Encoding ASCII
+  Write-Ok "portproxy: ${winHostIp}:$CdpPort -> 127.0.0.1:$CdpPort"
 
   # Recreate the rule to keep its interface scope correct and deterministic.
   $fwName = "OpenClaw Edge CDP $CdpPort"
@@ -260,12 +272,39 @@ Log '=== logon run ==='
 Start-Process -WindowStyle Hidden -FilePath 'wsl.exe' -ArgumentList @('-d', $Distro, '--', 'sh', '-c', 'sleep 300')
 Log ('WSL boot requested (distro=' + $Distro + ')')
 
-# 2) Restore the WSL-only proxy. Firewall scope is managed by windows-setup.ps1.
+# 2) Discover the current Windows-side WSL gateway and refresh the WSL-only
+#    proxy. The address can change after wsl --shutdown or a Windows reboot.
+$WinHostIp = $null
+for ($i = 0; $i -lt 30; $i++) {
+  $WinHostIp = (wsl -d $Distro -- sh -lc "ip route show default | head -n 1 | cut -d ' ' -f 3" 2>$null | Select-Object -First 1)
+  if ($WinHostIp) {
+    $WinHostIp = $WinHostIp.Trim()
+    if ($WinHostIp) { break }
+  }
+  Start-Sleep -Seconds 1
+}
+if (-not $WinHostIp) { Log 'ERROR: Windows-side WSL gateway was not detected'; exit 1 }
+$WslAdapter = Get-NetIPAddress -AddressFamily IPv4 -IPAddress $WinHostIp -ErrorAction SilentlyContinue | Select-Object -First 1
+if (-not $WslAdapter) { Log ('ERROR: WSL adapter not found for ' + $WinHostIp); exit 1 }
+
 Set-Service -Name iphlpsvc -StartupType Automatic
 Start-Service -Name iphlpsvc
-netsh interface portproxy delete v4tov4 listenport=$CdpPort listenaddress=0.0.0.0 2>$null | Out-Null
-netsh interface portproxy add v4tov4 listenport=$CdpPort listenaddress=0.0.0.0 connectport=$CdpPort connectaddress=127.0.0.1 | Out-Null
-Log ('portproxy restored on port ' + $CdpPort)
+$ProxyStateFile = Join-Path $logDir 'cdp-listen-address.txt'
+$PreviousProxyIp = if (Test-Path $ProxyStateFile) { (Get-Content $ProxyStateFile -Raw).Trim() } else { '' }
+@('0.0.0.0', $PreviousProxyIp, $WinHostIp) |
+  Where-Object { $_ } |
+  Select-Object -Unique |
+  ForEach-Object {
+    netsh interface portproxy delete v4tov4 listenport=$CdpPort listenaddress=$_ 2>$null | Out-Null
+  }
+netsh interface portproxy add v4tov4 listenport=$CdpPort listenaddress=$WinHostIp connectport=$CdpPort connectaddress=127.0.0.1 | Out-Null
+if ($LASTEXITCODE -ne 0) { Log 'ERROR: portproxy could not be created'; exit 1 }
+Set-Content -Path $ProxyStateFile -Value $WinHostIp -Encoding ASCII
+
+$FwName = 'OpenClaw Edge CDP ' + $CdpPort
+Remove-NetFirewallRule -DisplayName $FwName -ErrorAction SilentlyContinue
+New-NetFirewallRule -DisplayName $FwName -Direction Inbound -Action Allow -Protocol TCP -LocalPort $CdpPort -InterfaceAlias $WslAdapter.InterfaceAlias | Out-Null
+Log ('portproxy restored: ' + $WinHostIp + ':' + $CdpPort + ' -> 127.0.0.1:' + $CdpPort)
 
 # 3) Launch Edge only when the CDP endpoint is not already healthy.
 $up = $false
@@ -337,11 +376,23 @@ exit 0
   if (-not $cdpReady) {
     throw "Edge CDP did not start. Check: $env:LOCALAPPDATA\OpenClaw\openclaw-cdp.log"
   }
-  if (-not (Test-NetConnection -ComputerName $winHostIp -Port $CdpPort -InformationLevel Quiet)) {
-    throw "CDP works on localhost but the WSL portproxy is not reachable at ${winHostIp}:$CdpPort."
+  # Validate the complete path that deploy.sh will use: WSL -> Windows gateway ->
+  # portproxy -> Edge. Retry briefly because the scheduled task runs in parallel.
+  $wslCdpUrl = "http://${winHostIp}:$CdpPort/json/version"
+  $wslCdpReady = $false
+  for ($i = 0; $i -lt 30; $i++) {
+    wsl -d $WslDistro -- python3 -c "import sys,urllib.request; urllib.request.urlopen(sys.argv[1], timeout=3).read()" $wslCdpUrl 2>$null
+    if ($LASTEXITCODE -eq 0) {
+      $wslCdpReady = $true
+      break
+    }
+    Start-Sleep -Seconds 2
+  }
+  if (-not $wslCdpReady) {
+    throw "Edge CDP works on localhost but is not reachable from WSL at ${winHostIp}:$CdpPort. Check portproxy, the firewall rule, and $env:LOCALAPPDATA\OpenClaw\openclaw-cdp.log."
   }
   Write-Ok "Edge CDP ready: $($cdp.Browser)"
-  Write-Ok "WSL portproxy reachable at ${winHostIp}:$CdpPort"
+  Write-Ok "Edge CDP reachable from WSL at ${winHostIp}:$CdpPort"
 } else {
   Write-Section "STEP 4 - EDGE CDP"
   Write-Info "Skipped (run with -EnableBrowser to configure Edge CDP)"
@@ -364,4 +415,3 @@ Write-Host "    1. Open $WslDistro"
 Write-Host "    2. Clone saai-zero-touch and run: ./deploy.sh"
 Write-Host "    3. Validate: bash ~/saai-deploy/healthcheck.sh"
 Write-Host ""
-

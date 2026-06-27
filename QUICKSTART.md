@@ -262,6 +262,10 @@ Or close and reopen the WSL terminal.
 # Verify portproxy rule exists
 netsh interface portproxy show all
 
+# The listen address should match WSL's current Windows gateway, not 0.0.0.0
+wsl -d Ubuntu-22.04 -- sh -lc "ip route show default | head -n 1"
+Get-Content "$env:LOCALAPPDATA\OpenClaw\cdp-listen-address.txt"
+
 # Verify firewall rule is enabled
 Get-NetFirewallRule -DisplayName "OpenClaw Edge CDP 9222" | Select-Object DisplayName, Enabled, Direction, Action
 
@@ -284,6 +288,13 @@ A successful response returns Edge browser information. If it times out, inspect
 ```powershell
 Get-ScheduledTaskInfo -TaskName "OpenClaw-CDP-Autostart"
 Get-Content "$env:LOCALAPPDATA\OpenClaw\openclaw-cdp.log" -Tail 50
+```
+
+If the saved listen address differs from WSL's default gateway, start the task
+once to refresh the IP-specific proxy and firewall rule:
+
+```powershell
+Start-ScheduledTask -TaskName "OpenClaw-CDP-Autostart"
 ```
 
 ---

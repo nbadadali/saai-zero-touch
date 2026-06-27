@@ -75,8 +75,10 @@ Set-ExecutionPolicy Bypass -Scope Process -Force
 .\windows-setup.ps1 -WslDistro 'Ubuntu-22.04' -MemoryGB 8 -EnableBrowser
 ```
 
-The script enables systemd, restarts WSL, creates the WSL-only CDP proxy,
-launches a dedicated Edge automation profile, and validates it before returning.
+The script enables systemd, restarts WSL, binds the CDP proxy to WSL's current
+Windows gateway, launches a dedicated Edge automation profile, and validates
+the complete WSL-to-Edge path before returning. The logon task refreshes the
+binding automatically if the WSL gateway changes after a reboot.
 
 ### Touchpoint 3 — Deploy the stack (inside WSL2)
 
@@ -214,8 +216,10 @@ Usual causes: a `CHANGE_ME` left in `.env`, or Postgres/Redis not healthy yet.
 ```bash
 curl --noproxy '*' http://windows-host:9222/json/version
 ```
-If empty/refused, inspect `%LOCALAPPDATA%\OpenClaw\openclaw-cdp.log` and the
-`OpenClaw-CDP-Autostart` Scheduled Task.
+If empty/refused, inspect `%LOCALAPPDATA%\OpenClaw\openclaw-cdp.log`,
+`%LOCALAPPDATA%\OpenClaw\cdp-listen-address.txt`, and the
+`OpenClaw-CDP-Autostart` Scheduled Task. The `portproxy` listener must use the
+current WSL gateway IP, not `0.0.0.0`, because Edge owns `127.0.0.1:9222`.
 
 ---
 
