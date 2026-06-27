@@ -161,14 +161,14 @@ bash ~/saai-deploy/healthcheck.sh
 | OpenClaw gateway | ✅ | `openclaw-gateway.service` systemd user service + linger |
 | n8n Docker stack | ✅ | `n8n-stack.service` systemd user service + linger |
 | `.wslconfig` / systemd | ✅ | written once by `windows-setup.ps1` |
-| WSL wake-up trigger | ✅ | `OpenClaw-Stack-DelayedStart` Scheduled Task (fires 90 s after logon) |
+| WSL wake-up trigger | ✅ | `OpenClaw-Stack-DelayedStart` Scheduled Task (fires 15 s after logon and verifies UI ports) |
 | portproxy (9222) | ✅ → refreshed | Windows IP Helper + Scheduled Task |
 | Edge dedicated CDP profile | ✅ → relaunched | `OpenClaw-CDP-Autostart` task |
 | OpenClaw numeric CDP URL | ✅ → refreshed for the current WSL gateway | `/usr/local/bin/saai-boot.sh` |
 
-**How the startup chain works:** Windows fires the Scheduled Task 90 seconds
-after login, which runs `wsl.exe ... sleep 300`, keeping the WSL2 VM alive for
-5 minutes. During that window, systemd with linger starts
+**How the startup chain works:** Windows fires the Scheduled Task 15 seconds
+after login, which runs `wsl.exe --exec sleep 600` and waits for ports 18789 and
+5678. During that window, systemd with linger starts
 `openclaw-gateway.service` and `n8n-stack.service`. Compose waits for the main
 n8n service to finish database migrations before starting its workers.
 

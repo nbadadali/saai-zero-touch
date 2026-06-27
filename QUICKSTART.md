@@ -66,6 +66,8 @@ Example with all options:
 
 The script restarts WSL itself, launches the dedicated Edge CDP profile, and
 validates the Windows endpoint and WSL portproxy before it finishes.
+It also registers a logon task that wakes WSL after 15 seconds and reports
+success only after the OpenClaw and n8n ports are listening.
 
 ---
 
