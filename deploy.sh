@@ -275,7 +275,8 @@ fi
 #    wsl --shutdown, so a numeric CDP URL must be refreshed on every VM boot.
 if [ '${ENABLE_BROWSER_AUTOMATION}' = 'true' ] && [ -n "\$WIN_HOST_IP" ] && \
    [ -x '${NPM_GLOBAL}/bin/openclaw' ] && [ -f '${HOME_DIR}/.openclaw/openclaw.json' ]; then
-  if su - '${LINUX_USER}' -c "PATH='${NPM_GLOBAL}/bin:/usr/local/bin:/usr/bin:/bin' '${NPM_GLOBAL}/bin/openclaw' config set 'browser.profiles.${OPENCLAW_BROWSER_PROFILE}.cdpUrl' 'http://\$WIN_HOST_IP:${WINDOWS_CDP_PORT}'" >/dev/null 2>&1; then
+  PROFILE_JSON="{\"cdpUrl\":\"http://\$WIN_HOST_IP:${WINDOWS_CDP_PORT}\",\"color\":\"#0078D4\"}"
+  if su - '${LINUX_USER}' -c "PATH='${NPM_GLOBAL}/bin:/usr/local/bin:/usr/bin:/bin' '${NPM_GLOBAL}/bin/openclaw' config set 'browser.profiles.${OPENCLAW_BROWSER_PROFILE}' '\$PROFILE_JSON' --strict-json" >/dev/null 2>&1; then
     echo "OpenClaw CDP URL refreshed: http://\$WIN_HOST_IP:${WINDOWS_CDP_PORT}"
   else
     echo "WARNING: OpenClaw CDP URL refresh failed"
@@ -483,7 +484,7 @@ phase_browser() {
   # Resolve the current Windows gateway. Edge 149 rejects a DNS name in the CDP
   # Host header, so both validation and OpenClaw must use this numeric address.
   # The WSL boot helper refreshes the profile if this gateway changes later.
-  local win_host_ip cdp_url cdp_ready=false _i current_list updated_list
+  local win_host_ip cdp_url profile_json cdp_ready=false _i current_list updated_list
   win_host_ip="$(ip route show default 2>/dev/null | awk '$0 !~ /docker0|br-|veth/ {print $3; exit}')"
   [[ -n "${win_host_ip}" ]] || die "Could not detect the Windows host from the WSL default route."
   sudo sed -i '/[[:space:]]windows-host\([[:space:]]\|$\)/d' /etc/hosts 2>/dev/null || true
@@ -517,9 +518,9 @@ phase_browser() {
   log "configuring OpenClaw browser profile '${OPENCLAW_BROWSER_PROFILE}'"
   openclaw config set browser.enabled true --strict-json
   openclaw config set plugins.entries.browser.enabled true --strict-json
+  profile_json="$(jq -nc --arg cdp_url "${cdp_url}" '{cdpUrl:$cdp_url,color:"#0078D4"}')"
+  openclaw config set "browser.profiles.${OPENCLAW_BROWSER_PROFILE}" "${profile_json}" --strict-json
   openclaw config set browser.defaultProfile "${OPENCLAW_BROWSER_PROFILE}"
-  openclaw config set "browser.profiles.${OPENCLAW_BROWSER_PROFILE}.cdpUrl" "${cdp_url}"
-  openclaw config set "browser.profiles.${OPENCLAW_BROWSER_PROFILE}.color" "#0078D4"
   openclaw config set browser.remoteCdpTimeoutMs 5000 --strict-json
   openclaw config set browser.remoteCdpHandshakeTimeoutMs 10000 --strict-json
 
