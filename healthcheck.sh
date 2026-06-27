@@ -44,7 +44,7 @@ skip() { echo "${YLW}[SKIP]${RST} $*"; }
 wait_http() {
   local url="$1" tries="${2:-1}" i
   for ((i=0; i<tries; i++)); do
-    curl -fsS --connect-timeout 5 "${url}" >/dev/null 2>&1 && return 0
+    curl --noproxy '*' -fsS --connect-timeout 5 "${url}" >/dev/null 2>&1 && return 0
     sleep 5
   done
   return 1
@@ -52,8 +52,14 @@ wait_http() {
 
 # Is browser automation (Edge CDP) actually enabled for this deployment?
 BROWSER_ENABLED="false"
+WINDOWS_CDP_HOST="windows-host"
+WINDOWS_CDP_PORT="9222"
+OPENCLAW_BROWSER_PROFILE="windows-edge"
 if [[ -f "${CONFIG_FILE}" ]]; then
   BROWSER_ENABLED="$(bash -c "source '${CONFIG_FILE}' 2>/dev/null; echo \"\${ENABLE_BROWSER_AUTOMATION:-false}\"" 2>/dev/null || echo false)"
+  WINDOWS_CDP_HOST="$(bash -c "source '${CONFIG_FILE}' 2>/dev/null; echo \"\${WINDOWS_CDP_HOST:-windows-host}\"" 2>/dev/null || echo windows-host)"
+  WINDOWS_CDP_PORT="$(bash -c "source '${CONFIG_FILE}' 2>/dev/null; echo \"\${WINDOWS_CDP_PORT:-9222}\"" 2>/dev/null || echo 9222)"
+  OPENCLAW_BROWSER_PROFILE="$(bash -c "source '${CONFIG_FILE}' 2>/dev/null; echo \"\${OPENCLAW_BROWSER_PROFILE:-windows-edge}\"" 2>/dev/null || echo windows-edge)"
 fi
 
 # docker wrapper that survives a not-yet-active docker group in this shell
@@ -148,37 +154,36 @@ else
   fail "n8n UI (:5678): no response after ~150s  →  check: docker compose logs n8n"
 fi
 
-# ─── Edge CDP (Windows host via WSL gateway) ─────────────────────────────────
-# Detect Windows host IP from the WSL default route (same IP the portproxy listens on).
+# ─── Edge CDP and OpenClaw browser profile ───────────────────────────────────
 if [[ "${BROWSER_ENABLED}" != "true" ]]; then
   skip "Edge CDP: browser automation disabled (ENABLE_BROWSER_AUTOMATION=false) — not checked"
-  WIN_HOST_IP=""
 else
-  # Windows host = the WSL default gateway. Exclude docker0/bridge/veth interfaces
-  # whose gateway (e.g. 172.17.0.1 = docker0) is NOT the Windows host — that is the
-  # same vEthernet (WSL) IP the portproxy listens on in windows-setup.ps1.
-  WIN_HOST_IP="$(ip route show default 2>/dev/null | awk '$0 !~ /docker0|br-|veth/ {print $3; exit}')"
-fi
-if [[ "${BROWSER_ENABLED}" == "true" ]]; then
- if [[ -z "${WIN_HOST_IP}" ]]; then
-  warn "Edge CDP: could not detect Windows host IP from WSL default route"
-else
-  CDP_URL="http://${WIN_HOST_IP}:9222/json/version"
-  CDP_RESP="$(curl -fsS --connect-timeout 5 "${CDP_URL}" 2>/dev/null)"
+  CDP_RESOLVED_IP="$(getent ahostsv4 "${WINDOWS_CDP_HOST}" 2>/dev/null | awk 'NR==1{print $1}')"
+  if [[ -z "${CDP_RESOLVED_IP}" ]]; then
+    fail "Edge CDP hostname '${WINDOWS_CDP_HOST}' does not resolve  →  re-run: ./deploy.sh --only browser"
+  fi
+
+  CDP_URL="http://${WINDOWS_CDP_HOST}:${WINDOWS_CDP_PORT}/json/version"
+  CDP_RESP="$(curl --noproxy '*' -fsS --connect-timeout 5 "${CDP_URL}" 2>/dev/null)"
   if [[ -z "${CDP_RESP}" ]]; then
-    fail "Edge CDP (${WIN_HOST_IP}:9222): no response  →  run windows-setup.ps1 -EnableBrowser and ensure Edge is open with CDP"
+    fail "Edge CDP (${WINDOWS_CDP_HOST}:${WINDOWS_CDP_PORT}): no response  →  check Windows task OpenClaw-CDP-Autostart"
   else
     # Extract Browser field from JSON response to confirm it's actually Edge
     BROWSER_VER="$(echo "${CDP_RESP}" | grep -o '"Browser": *"[^"]*"' | cut -d'"' -f4)"
     if [[ -n "${BROWSER_VER}" ]]; then
-      chk "Edge CDP (${WIN_HOST_IP}:9222): reachable — ${BROWSER_VER}"
+      chk "Edge CDP (${WINDOWS_CDP_HOST}:${WINDOWS_CDP_PORT}, ${CDP_RESOLVED_IP}): reachable — ${BROWSER_VER}"
     else
-      warn "Edge CDP (${WIN_HOST_IP}:9222): responded but could not parse Browser field"
+      warn "Edge CDP (${WINDOWS_CDP_HOST}:${WINDOWS_CDP_PORT}): responded but could not parse Browser field"
     fi
   fi
-fi
 
-fi  # end browser-enabled CDP check
+  if command -v openclaw >/dev/null 2>&1 && \
+     openclaw browser --browser-profile "${OPENCLAW_BROWSER_PROFILE}" doctor >/dev/null 2>&1; then
+    chk "OpenClaw browser profile '${OPENCLAW_BROWSER_PROFILE}': ready"
+  else
+    fail "OpenClaw browser profile '${OPENCLAW_BROWSER_PROFILE}': doctor failed"
+  fi
+fi
 
 # ─── Summary ─────────────────────────────────────────────────────────────────
 echo

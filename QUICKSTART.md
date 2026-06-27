@@ -46,7 +46,7 @@ Set-ExecutionPolicy Bypass -Scope Process -Force
 Run the setup script with your WSL distro name:
 
 ```powershell
-.\windows-setup.ps1 -WslDistro 'Ubuntu-22.04'
+.\windows-setup.ps1 -WslDistro 'Ubuntu-22.04' -EnableBrowser
 ```
 
 **Optional flags:**
@@ -55,7 +55,7 @@ Run the setup script with your WSL distro name:
 |------|-------------|
 | `-MemoryGB 12` | Client has 16+ GB RAM — give WSL more headroom |
 | `-SwapGB 8` | Client has large RAM but slow disk — keep default 4 |
-| `-EnableBrowser` | Client needs OpenClaw browser automation via Edge CDP |
+| `-EnableBrowser` | Required for the standard SAAI Edge CDP integration |
 
 Example with all options:
 
@@ -63,11 +63,8 @@ Example with all options:
 .\windows-setup.ps1 -WslDistro 'Ubuntu-22.04' -MemoryGB 12 -EnableBrowser
 ```
 
-When the script finishes, apply WSL memory settings:
-
-```powershell
-wsl --shutdown
-```
+The script restarts WSL itself, launches the dedicated Edge CDP profile, and
+validates the Windows endpoint and WSL portproxy before it finishes.
 
 ---
 
@@ -109,16 +106,8 @@ Only two things need your attention on a fresh install:
 - `WEBHOOK_URL` / `N8N_EDITOR_BASE_URL` — leave as `http://localhost:5678` for local installs
 - `OPENCLAW_VERSION` — leave blank for latest
 
-**If this client needs browser automation (Edge CDP):**
-```bash
-# Set before running deploy.sh — cannot be changed mid-run
-ENABLE_BROWSER_AUTOMATION="true"
-```
-If you forgot to set this and deploy.sh already ran, fix it and resume:
-```bash
-nano ~/saai-deploy/config.env   # set ENABLE_BROWSER_AUTOMATION="true"
-./deploy.sh --from browser
-```
+Browser automation is enabled by default. `deploy.sh` maintains the stable
+`windows-host` alias and configures OpenClaw's `windows-edge` remote CDP profile.
 
 Save and close (`Ctrl+X`, then `Y`, then `Enter` in nano).
 
@@ -281,14 +270,14 @@ netstat -an | Select-String "9222"
 
 ```bash
 # Get Windows host IP and test CDP endpoint
-WIN_IP=$(ip route show default | awk '{print $3; exit}')
-curl -s http://${WIN_IP}:9222/json/version | python3 -m json.tool
+curl --noproxy '*' -s http://windows-host:9222/json/version | python3 -m json.tool
 ```
 
-A successful response returns Edge browser info JSON. If it times out or is refused, restart CDP:
+A successful response returns Edge browser information. If it times out, inspect:
 
 ```powershell
-& "C:\Scripts\Start-OpenClaw-CDP.ps1"
+Get-ScheduledTaskInfo -TaskName "OpenClaw-CDP-Autostart"
+Get-Content "$env:LOCALAPPDATA\OpenClaw\openclaw-cdp.log" -Tail 50
 ```
 
 ---
@@ -317,4 +306,4 @@ Use this at the end of every client deployment:
 - [ ] http://localhost:5678 loads and login works
 - [ ] n8n API key generated and added to config.env
 - [ ] Machine rebooted and stack came back up automatically
-- [ ] (If `-EnableBrowser`) `curl -s http://$(ip route show default | awk '{print $3; exit}'):9222/json/version` returns Edge browser info JSON
+- [ ] `curl --noproxy '*' -s http://windows-host:9222/json/version` returns Edge browser info JSON

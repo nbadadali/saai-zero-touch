@@ -23,7 +23,7 @@
 #   browser repo env_file stack autostart validate
 # =============================================================================
 
-set -Eeuo pipefail
+set -euo pipefail
 
 # ─── Locate self & load config ───────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -57,7 +57,9 @@ WSL_SWAP_GB="4"
 OPENCLAW_INSTALL_METHOD="npm"; OPENCLAW_GATEWAY_PORT="18789"
 OPENCLAW_VERSION=""       # pin version, e.g. "1.4.2"; blank = install latest
 REPO_REVISION=""          # pin repo tag/commit, e.g. "v1.0.0"; blank = pull latest main
-ENABLE_BROWSER_AUTOMATION="false"
+ENABLE_BROWSER_AUTOMATION="true"
+WINDOWS_CDP_HOST="windows-host"; WINDOWS_CDP_PORT="9222"
+OPENCLAW_BROWSER_PROFILE="windows-edge"
 N8N_ENCRYPTION_KEY=""; N8N_JWT_SECRET=""; DB_POSTGRESDB_PASSWORD=""
 PGVECTOR_PASSWORD=""; MCP_AUTH_TOKEN=""; N8N_API_KEY=""
 WEBHOOK_URL="http://localhost:5678"; N8N_EDITOR_BASE_URL="http://localhost:5678"
@@ -210,6 +212,22 @@ export PATH
 LOG=/var/log/saai-boot.log
 exec >> "\$LOG" 2>&1
 echo "===== saai-boot \$(date) ====="
+
+# Keep a stable hostname for the Windows host. WSL's gateway IP may change after
+# shutdown/restart, while OpenClaw's remote CDP profile must use a stable URL.
+k=0; WIN_HOST_IP=""
+while [ "\$k" -lt 60 ]; do
+  WIN_HOST_IP="\$(ip route show default 2>/dev/null | awk '\$0 !~ /docker0|br-|veth/ {print \$3; exit}')"
+  [ -n "\$WIN_HOST_IP" ] && break
+  k=\$((k+1)); sleep 2
+done
+if [ -n "\$WIN_HOST_IP" ]; then
+  sed -i '/[[:space:]]${WINDOWS_CDP_HOST}\([[:space:]]\|\$\)/d' /etc/hosts 2>/dev/null || true
+  printf '%s\t%s\n' "\$WIN_HOST_IP" '${WINDOWS_CDP_HOST}' >> /etc/hosts
+  echo "Windows host alias: ${WINDOWS_CDP_HOST}=\$WIN_HOST_IP"
+else
+  echo "WARNING: Windows host gateway was not detected"
+fi
 
 # 1) Ensure the docker daemon is up AND stable. At cold boot dockerd briefly
 #    accepts then resets connections, which makes a single 'compose up' fail.
@@ -435,24 +453,88 @@ phase_browser() {
     ok "browser automation disabled in config — skipping (set ENABLE_BROWSER_AUTOMATION=true to enable)"
     return 0
   fi
-  $DRY_RUN && { echo "   ${YLW}[dry-run]${RST} would set up Playwright + discover OpenClaw browser command"; return 0; }
+  $DRY_RUN && { echo "   ${YLW}[dry-run]${RST} would validate Windows CDP and configure an OpenClaw remote browser profile"; return 0; }
 
-  log "installing Playwright Edge runtime (best-effort)"
-  pip3 install playwright --break-system-packages -q 2>/dev/null || pip3 install playwright -q 2>/dev/null || \
-    run_step "npm install -g playwright" || warn "playwright install failed — continuing"
-  python3 -m playwright install msedge 2>/dev/null || warn "Edge runtime install via Playwright failed"
+  # Resolve the current Windows gateway and maintain a stable hostname. The WSL
+  # boot helper repeats this on every WSL start so OpenClaw config never contains
+  # an ephemeral gateway IP.
+  local win_host_ip cdp_url cdp_ready=false _i current_list updated_list
+  win_host_ip="$(ip route show default 2>/dev/null | awk '$0 !~ /docker0|br-|veth/ {print $3; exit}')"
+  [[ -n "${win_host_ip}" ]] || die "Could not detect the Windows host from the WSL default route."
+  sudo python3 - "${win_host_ip}" "${WINDOWS_CDP_HOST}" <<'PYEOF'
+import re, sys
+ip, alias = sys.argv[1], sys.argv[2]
+path = "/etc/hosts"
+try:
+    lines = open(path, encoding="utf-8").read().splitlines()
+except FileNotFoundError:
+    lines = []
+pattern = re.compile(r"(?:^|\s)" + re.escape(alias) + r"(?:\s|$)")
+lines = [line for line in lines if not pattern.search(line)]
+lines.append(f"{ip}\t{alias}")
+open(path, "w", encoding="utf-8").write("\n".join(lines) + "\n")
+PYEOF
+  ok "Windows host alias: ${WINDOWS_CDP_HOST} -> ${win_host_ip}"
 
-  # Do NOT guess the CLI subcommand. Discover it.
-  log "discovering OpenClaw browser-enable command"
-  local helptext; helptext="$(openclaw --help 2>&1; openclaw plugins --help 2>&1; openclaw skills --help 2>&1)"
-  if echo "$helptext" | grep -q "plugins"; then
-    run_step "openclaw plugins enable browser" || warn "'openclaw plugins enable browser' failed — verify manually"
-  elif echo "$helptext" | grep -q "skills"; then
-    warn "Use 'openclaw skills' to enable the browser skill — see post-restart validation doc"
-  else
-    warn "Could not auto-discover the browser command. Enable manually and run: openclaw skills check"
+  cdp_url="http://${WINDOWS_CDP_HOST}:${WINDOWS_CDP_PORT}"
+  if ! curl --noproxy '*' -fsS --connect-timeout 5 "${cdp_url}/json/version" >/dev/null 2>&1; then
+    log "CDP is not ready; triggering the Windows recovery task"
+    if command -v powershell.exe >/dev/null 2>&1; then
+      powershell.exe -NoProfile -NonInteractive -Command \
+        "Start-ScheduledTask -TaskName 'OpenClaw-CDP-Autostart'" >/dev/null 2>&1 || \
+        die "Could not start the Windows task 'OpenClaw-CDP-Autostart'. Run windows-setup.ps1 -EnableBrowser first."
+    else
+      die "powershell.exe is not available from WSL. Confirm Windows interop is enabled."
+    fi
   fi
-  warn "Browser automation also requires the Windows side (Edge CDP). Run windows-setup.ps1 with -EnableBrowser."
+
+  log "waiting up to 120s for Windows Edge CDP"
+  for _i in $(seq 1 24); do
+    if curl --noproxy '*' -fsS --connect-timeout 5 "${cdp_url}/json/version" >/dev/null 2>&1; then
+      cdp_ready=true
+      break
+    fi
+    sleep 5
+  done
+  $cdp_ready || die "Edge CDP is not reachable at ${cdp_url}. Check the Windows OpenClaw-CDP-Autostart task and openclaw-cdp.log."
+  ok "Windows Edge CDP reachable at ${cdp_url}"
+
+  # Configure the documented OpenClaw remote-CDP profile. Config writes are
+  # schema-validated by OpenClaw and the gateway is restarted only afterwards.
+  log "configuring OpenClaw browser profile '${OPENCLAW_BROWSER_PROFILE}'"
+  openclaw config set browser.enabled true --strict-json
+  openclaw config set plugins.entries.browser.enabled true --strict-json
+  openclaw config set browser.defaultProfile "${OPENCLAW_BROWSER_PROFILE}"
+  openclaw config set "browser.profiles.${OPENCLAW_BROWSER_PROFILE}.cdpUrl" "${cdp_url}"
+  openclaw config set "browser.profiles.${OPENCLAW_BROWSER_PROFILE}.color" "#0078D4"
+  openclaw config set browser.remoteCdpTimeoutMs 5000 --strict-json
+  openclaw config set browser.remoteCdpHandshakeTimeoutMs 10000 --strict-json
+
+  # Preserve existing allowlists while ensuring both the plugin loader and agent
+  # tool policy permit browser automation.
+  if current_list="$(openclaw config get plugins.allow --json 2>/dev/null)" && \
+     echo "${current_list}" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    updated_list="$(echo "${current_list}" | jq -c 'if index("browser") then . else . + ["browser"] end')"
+    openclaw config set plugins.allow "${updated_list}" --strict-json
+  fi
+  current_list="$(openclaw config get tools.alsoAllow --json 2>/dev/null || printf '[]')"
+  echo "${current_list}" | jq -e 'type == "array"' >/dev/null 2>&1 || current_list='[]'
+  updated_list="$(echo "${current_list}" | jq -c 'if index("browser") then . else . + ["browser"] end')"
+  openclaw config set tools.alsoAllow "${updated_list}" --strict-json
+  openclaw config validate
+
+  systemctl --user restart "${GATEWAY_SERVICE}"
+  for _i in $(seq 1 24); do
+    systemctl --user is-active --quiet "${GATEWAY_SERVICE}" && break
+    sleep 2
+  done
+  systemctl --user is-active --quiet "${GATEWAY_SERVICE}" || die "OpenClaw gateway did not restart after browser configuration."
+
+  if openclaw browser --browser-profile "${OPENCLAW_BROWSER_PROFILE}" doctor >/dev/null 2>&1; then
+    ok "OpenClaw browser profile '${OPENCLAW_BROWSER_PROFILE}' is ready"
+  else
+    die "Raw CDP is reachable, but OpenClaw browser doctor failed for profile '${OPENCLAW_BROWSER_PROFILE}'."
+  fi
 }
 
 phase_repo() {
@@ -824,5 +906,5 @@ echo "  • full log      : ${LOG_FILE}"
 echo "  • run docker yourself: newgrp docker   # (this shell only; automatic after reboot/new WSL session)"
 echo
 echo "  Windows host steps (run once, in PowerShell as Administrator):"
-echo "      .\\windows-setup.ps1 -WslDistro '${WSL_DISTRO}' -WslUser '${LINUX_USER}'"
+echo "      .\\windows-setup.ps1 -WslDistro '${WSL_DISTRO}' -EnableBrowser"
 echo

@@ -16,8 +16,8 @@ Three things are imposed by Windows + WSL2 and cannot be scripted away:
 
 1. **WSL must exist before any Linux script can run.** If the client has no WSL2
    yet, installing it (`wsl --install`) requires a **Windows reboot**.
-2. **`.wslconfig` and `/etc/wsl.conf` only apply after `wsl --shutdown`.** Memory
-   tuning and systemd activation need a WSL restart to take effect.
+2. **`.wslconfig` and `/etc/wsl.conf` only apply after `wsl --shutdown`.** The
+   Windows setup script performs this restart automatically.
 3. **Edge remote-debugging and the WSL→Windows portproxy do not survive reboot.**
    They are re-applied automatically at each login by a Scheduled Task, but that
    task must be registered once (done by `windows-setup.ps1`).
@@ -31,7 +31,7 @@ Everything else **is** automated and idempotent. Realistic human touchpoints: **
 | # | Where | Action | One-time? |
 |---|-------|--------|-----------|
 | 1 | Windows PowerShell (Admin) | `wsl --install` **only if WSL2 isn't present**, then reboot | yes |
-| 2 | Windows PowerShell (Admin) | run `windows-setup.ps1`, then `wsl --shutdown` | yes |
+| 2 | Windows PowerShell (Admin) | run `windows-setup.ps1 -EnableBrowser` | yes |
 | 3 | WSL2 Ubuntu | fill `config.env`, run `./deploy.sh` | yes |
 
 After this, every reboot brings the whole stack back up on its own.
@@ -70,20 +70,11 @@ Copy this folder somewhere on Windows (or access it via `\\wsl$`). In
 
 ```powershell
 Set-ExecutionPolicy Bypass -Scope Process -Force
-.\windows-setup.ps1 -WslDistro 'Ubuntu-22.04'
-```
-
-Add `-EnableBrowser` only if this client needs OpenClaw browser automation:
-
-```powershell
 .\windows-setup.ps1 -WslDistro 'Ubuntu-22.04' -MemoryGB 8 -EnableBrowser
 ```
 
-Then apply WSL settings:
-
-```powershell
-wsl --shutdown
-```
+The script enables systemd, restarts WSL, creates the WSL-only CDP proxy,
+launches a dedicated Edge automation profile, and validates it before returning.
 
 ### Touchpoint 3 — Deploy the stack (inside WSL2)
 
@@ -148,8 +139,9 @@ bash ~/saai-deploy/healthcheck.sh
 | `.wslconfig` / systemd | ✅ | written once by `windows-setup.ps1` |
 | Windows Startup launcher | ✅ | `windows-setup.ps1` |
 | WSL wake-up trigger | ✅ | `OpenClaw-Stack-DelayedStart` Scheduled Task (fires 90 s after logon) |
-| portproxy (9222) | ❌ → re-applied | Scheduled Task at logon |
-| Edge with `--remote-debugging` | ❌ → relaunched | Scheduled Task at logon |
+| portproxy (9222) | ✅ → refreshed | Windows IP Helper + Scheduled Task |
+| Edge dedicated CDP profile | ✅ → relaunched | `OpenClaw-CDP-Autostart` task |
+| Windows host alias in WSL | ✅ → refreshed | `/usr/local/bin/saai-boot.sh` |
 
 **How the startup chain works:** Windows fires the Scheduled Task 90 seconds after login, which runs `wsl.exe … sleep 180` — keeping the WSL2 VM alive for 3 minutes. During that window, systemd (with linger enabled) starts `openclaw-gateway.service` and `n8n-stack.service`. Once the Docker containers are running they keep the WSL VM alive indefinitely.
 
@@ -199,9 +191,10 @@ Usual causes: a `CHANGE_ME` left in `.env`, or Postgres/Redis not healthy yet.
 
 **Edge CDP not reachable from WSL** —
 ```bash
-curl http://$(ip route show default | awk '{print $3; exit}'):9222/json/version
+curl --noproxy '*' http://windows-host:9222/json/version
 ```
-If empty/refused, in PowerShell (Admin): `& "C:\Scripts\Start-OpenClaw-CDP.ps1"`.
+If empty/refused, inspect `%LOCALAPPDATA%\OpenClaw\openclaw-cdp.log` and the
+`OpenClaw-CDP-Autostart` Scheduled Task.
 
 ---
 

@@ -28,6 +28,7 @@ param(
   [string]$WslRepoDir = "",
   [int]$MemoryGB      = 6,
   [int]$SwapGB        = 4,
+  [int]$CdpPort       = 9222,
   [switch]$EnableBrowser
 )
 
@@ -77,7 +78,46 @@ if (Test-Path $wslConfigPath) {
 }
 Set-Content -Path $wslConfigPath -Value $wslConfig -Encoding UTF8
 Write-Ok ".wslconfig written ($MemoryGB GB mem / $SwapGB GB swap)"
-Write-Warn "Run 'wsl --shutdown' for memory settings to take effect"
+
+# deploy.sh requires a working systemd user session during preflight. Enable
+# systemd before the first Linux deployment while preserving other wsl.conf keys.
+$systemdPatch = @'
+import re
+path = "/etc/wsl.conf"
+try:
+    text = open(path, encoding="utf-8").read()
+except FileNotFoundError:
+    text = ""
+if re.search(r"(?m)^\[boot\]", text):
+    def patch(match):
+        block = match.group(0)
+        if re.search(r"(?m)^systemd\s*=", block):
+            block = re.sub(r"(?m)^systemd\s*=.*$", "systemd=true", block)
+        else:
+            block = block.rstrip() + "\nsystemd=true\n"
+        return block
+    text = re.sub(r"(?ms)^\[boot\].*?(?=^\[|\Z)", patch, text)
+else:
+    text = text.rstrip() + ("\n" if text.strip() else "") + "[boot]\nsystemd=true\n"
+open(path, "w", encoding="utf-8").write(text)
+'@
+$systemdPatchB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($systemdPatch))
+wsl -d $WslDistro -u root -- python3 -c "import base64;exec(base64.b64decode('$systemdPatchB64'))"
+if ($LASTEXITCODE -ne 0) {
+  throw "Could not enable systemd in /etc/wsl.conf for '$WslDistro'."
+}
+Write-Ok "WSL systemd enabled in /etc/wsl.conf"
+
+# Apply .wslconfig and wsl.conf now, before detecting the adapter used by CDP.
+Write-Info "Restarting WSL to apply memory and systemd settings..."
+wsl --shutdown
+Start-Sleep -Seconds 5
+wsl -d $WslDistro -- sh -lc "echo wsl-ready" 2>&1 | Out-Null
+if ($LASTEXITCODE -ne 0) {
+  throw "WSL distro '$WslDistro' did not restart successfully."
+}
+Start-Sleep -Seconds 5
+Write-Ok "WSL restarted with systemd enabled"
 
 # --- Step 3: login autostart -------------------------------------------------
 Write-Section "STEP 3 - LOGIN AUTOSTART (WSL WAKE)"
@@ -134,7 +174,7 @@ $principal    = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Inte
 Register-ScheduledTask -TaskName $autoTaskName -Action $autoAction -Trigger $autoTrigger -Settings $autoSettings -Principal $principal -Description "OpenClaw: wake WSL2 VM 90s after logon  -- systemd+linger starts all services" | Out-Null
 Write-Ok "Scheduled task registered: $autoTaskName (fires 90 s after logon, no path/user dependency)"
 
-# --- Step 4-6: Edge CDP (optional) -------------------------------------------
+# --- Step 4: Edge CDP (optional) ---------------------------------------------
 if ($EnableBrowser) {
   Write-Section "STEP 4 - EDGE CDP (PORTPROXY + FIREWALL + TASK)"
 
@@ -144,59 +184,74 @@ if ($EnableBrowser) {
   wsl -d $WslDistro -- echo "wsl ready" 2>&1 | Out-Null
   Start-Sleep -Seconds 4
 
-  # Detect Windows WSL vEthernet adapter IP
-  # (resolv.conf nameserver can return 10.255.255.254 on some WSL builds, which is not routable for portproxy)
-  $winHostIp = (Get-NetIPAddress -AddressFamily IPv4 |
+  # Detect the Windows side of the WSL virtual adapter. The interface is used to
+  # scope the firewall rule so CDP is not exposed through Wi-Fi or Ethernet.
+  $wslAdapter = Get-NetIPAddress -AddressFamily IPv4 |
     Where-Object {
       $_.InterfaceAlias -like "vEthernet (WSL*" -and
       $_.IPAddress -notlike "169.*"
     } |
-    Select-Object -First 1 -ExpandProperty IPAddress)
-  if (-not $winHostIp) {
-    throw "Could not detect WSL vEthernet IP address after starting WSL2. Check that WSL2 is installed correctly and try again."
+    Select-Object -First 1
+  if (-not $wslAdapter) {
+    throw "Could not detect the WSL vEthernet adapter after starting WSL2."
   }
-  Write-Info "WSL vEthernet adapter IP: $winHostIp"
+  $winHostIp = $wslAdapter.IPAddress
+  $wslInterface = $wslAdapter.InterfaceAlias
+  Write-Info "WSL adapter: $wslInterface ($winHostIp)"
 
-  # portproxy (idempotent: delete then add)
-  netsh interface portproxy delete v4tov4 listenport=9222 listenaddress=$winHostIp 2>$null | Out-Null
+  # netsh portproxy relies on the Windows IP Helper service.
+  Set-Service -Name iphlpsvc -StartupType Automatic
+  Start-Service -Name iphlpsvc
+  Write-Ok "Windows IP Helper service is running"
+
+  # Bind the proxy independently of the current WSL gateway IP. The firewall
+  # rule below limits access to the WSL virtual interface only.
+  netsh interface portproxy delete v4tov4 listenport=$CdpPort listenaddress=0.0.0.0 2>$null | Out-Null
+  netsh interface portproxy delete v4tov4 listenport=$CdpPort listenaddress=$winHostIp 2>$null | Out-Null
   netsh interface portproxy add v4tov4 `
-    listenport=9222 `
-    listenaddress=$winHostIp `
-    connectport=9222 `
+    listenport=$CdpPort `
+    listenaddress=0.0.0.0 `
+    connectport=$CdpPort `
     connectaddress=127.0.0.1 | Out-Null
-  Write-Ok "portproxy: ${winHostIp}:9222 -> 127.0.0.1:9222"
+  if ($LASTEXITCODE -ne 0) { throw "Could not create the Edge CDP portproxy." }
+  Write-Ok "portproxy: WSL interface port $CdpPort -> 127.0.0.1:$CdpPort"
 
-  # firewall
-  $fwName = "OpenClaw Edge CDP 9222"
-  if (-not (Get-NetFirewallRule -DisplayName $fwName -ErrorAction SilentlyContinue)) {
-    New-NetFirewallRule -DisplayName $fwName -Direction Inbound -Action Allow -Protocol TCP -LocalPort 9222 | Out-Null
-    Write-Ok "Firewall rule created: $fwName"
-  } else {
-    Enable-NetFirewallRule -DisplayName $fwName
-    Write-Ok "Firewall rule present: $fwName"
-  }
+  # Recreate the rule to keep its interface scope correct and deterministic.
+  $fwName = "OpenClaw Edge CDP $CdpPort"
+  Remove-NetFirewallRule -DisplayName $fwName -ErrorAction SilentlyContinue
+  New-NetFirewallRule `
+    -DisplayName $fwName `
+    -Direction Inbound `
+    -Action Allow `
+    -Protocol TCP `
+    -LocalPort $CdpPort `
+    -InterfaceAlias $wslInterface | Out-Null
+  Write-Ok "Firewall rule restricted to: $wslInterface"
 
   # Resolve Edge path
   $edge = "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
   if (-not (Test-Path $edge)) { $edge = "C:\Program Files\Microsoft\Edge\Application\msedge.exe" }
+  if (-not (Test-Path $edge)) { throw "Microsoft Edge executable was not found." }
 
-  # Startup script (single-quoted here-string: no escaping pitfalls).
-  # Placeholders __IP__ and __EDGE__ are substituted afterwards.
+  # This script is run immediately and at every Windows login. It uses a
+  # dedicated Edge profile, leaving the user's normal Edge windows untouched.
   $scriptDir = "C:\Scripts"
   New-Item -ItemType Directory -Force -Path $scriptDir | Out-Null
   $cdpScript = Join-Path $scriptDir "Start-OpenClaw-CDP.ps1"
   $cdpBody = @'
 # Auto-generated by windows-setup.ps1  -- runs at every logon (elevated).
-# Reboot-proof: boots WSL (so systemd+linger start the stack), waits for the WSL
-# vEthernet adapter, detects its IP at RUNTIME (survives IP changes), re-applies
-# the 9222 portproxy, and launches Edge with remote debugging. Logs next to itself.
-$ErrorActionPreference = 'SilentlyContinue'
+# Reboot-proof: wakes WSL, restores the portproxy, and launches a dedicated Edge
+# automation profile with CDP. Logs to %LOCALAPPDATA%\OpenClaw.
+$ErrorActionPreference = 'Stop'
 $logDir = Join-Path $env:LOCALAPPDATA 'OpenClaw'
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 $log = Join-Path $logDir 'openclaw-cdp.log'
 function Log($m) { ('{0}  {1}' -f (Get-Date -Format s), $m) | Out-File -FilePath $log -Append -Encoding utf8 }
 $Distro = '__DISTRO__'
 $Edge   = '__EDGE__'
+$CdpPort = __CDP_PORT__
+$Profile = Join-Path $env:LOCALAPPDATA 'OpenClaw\Edge-CDP-Profile'
+New-Item -ItemType Directory -Force -Path $Profile | Out-Null
 Log '=== logon run ==='
 
 # 1) Boot the WSL2 VM in the background so systemd + linger start the OpenClaw
@@ -205,38 +260,46 @@ Log '=== logon run ==='
 Start-Process -WindowStyle Hidden -FilePath 'wsl.exe' -ArgumentList @('-d', $Distro, '--', 'sh', '-c', 'sleep 300')
 Log ('WSL boot requested (distro=' + $Distro + ')')
 
-# 2) Wait for the WSL vEthernet adapter, then detect its CURRENT IP.
-$ip = $null
-for ($i = 0; $i -lt 60; $i++) {
-  $ip = Get-NetIPAddress -AddressFamily IPv4 |
-        Where-Object { $_.InterfaceAlias -like 'vEthernet (WSL*' -and $_.IPAddress -notlike '169.*' } |
-        Select-Object -First 1 -ExpandProperty IPAddress
-  if ($ip) { break }
-  Start-Sleep -Seconds 2
-}
-if (-not $ip) { Log 'ERROR: WSL vEthernet IP not found after ~120s'; exit 1 }
-Log ('WSL vEthernet IP: ' + $ip)
+# 2) Restore the WSL-only proxy. Firewall scope is managed by windows-setup.ps1.
+Set-Service -Name iphlpsvc -StartupType Automatic
+Start-Service -Name iphlpsvc
+netsh interface portproxy delete v4tov4 listenport=$CdpPort listenaddress=0.0.0.0 2>$null | Out-Null
+netsh interface portproxy add v4tov4 listenport=$CdpPort listenaddress=0.0.0.0 connectport=$CdpPort connectaddress=127.0.0.1 | Out-Null
+Log ('portproxy restored on port ' + $CdpPort)
 
-# 3) (Re)apply the portproxy on the current IP.
-netsh interface portproxy delete v4tov4 listenport=9222 listenaddress=$ip 2>$null | Out-Null
-netsh interface portproxy add v4tov4 listenport=9222 listenaddress=$ip connectport=9222 connectaddress=127.0.0.1 | Out-Null
-Log ('portproxy: ' + $ip + ':9222 -> 127.0.0.1:9222')
-
-# 4) Ensure Edge is running with remote debugging. Edge is single-instance per
-#    profile, so if a normal Edge is already open without CDP it must be restarted
-#    for the port to bind. Skip entirely if CDP is already answering.
+# 3) Launch Edge only when the CDP endpoint is not already healthy.
 $up = $false
-try { Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 'http://127.0.0.1:9222/json/version' | Out-Null; $up = $true } catch { $up = $false }
+try { Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 "http://127.0.0.1:$CdpPort/json/version" | Out-Null; $up = $true } catch { $up = $false }
 if (-not $up) {
-  Stop-Process -Name msedge -Force -ErrorAction SilentlyContinue
-  Start-Sleep -Seconds 2
-  Start-Process -FilePath $Edge -ArgumentList @('--remote-debugging-port=9222', '--remote-allow-origins=*')
-  Log 'launched Edge with CDP'
+  Start-Process -FilePath $Edge -ArgumentList @(
+    "--remote-debugging-port=$CdpPort",
+    '--remote-debugging-address=127.0.0.1',
+    '--remote-allow-origins=*',
+    "--user-data-dir=`"$Profile`"",
+    '--no-first-run',
+    '--no-default-browser-check'
+  )
+  Log ('launched dedicated Edge CDP profile: ' + $Profile)
 } else {
-  Log 'Edge CDP already listening on 9222'
+  Log ('Edge CDP already listening on ' + $CdpPort)
 }
+
+# 4) Do not report success until Edge actually exposes /json/version.
+$up = $false
+for ($i = 0; $i -lt 30; $i++) {
+  try {
+    Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 "http://127.0.0.1:$CdpPort/json/version" | Out-Null
+    $up = $true
+    break
+  } catch {
+    Start-Sleep -Seconds 2
+  }
+}
+if (-not $up) { Log 'ERROR: Edge CDP did not become ready after 60 seconds'; exit 1 }
+Log 'Edge CDP is ready'
+exit 0
 '@
-  $cdpBody = $cdpBody.Replace("__DISTRO__", $WslDistro).Replace("__EDGE__", $edge)
+  $cdpBody = $cdpBody.Replace("__DISTRO__", $WslDistro).Replace("__EDGE__", $edge).Replace("__CDP_PORT__", [string]$CdpPort)
   Set-Content -Path $cdpScript -Value $cdpBody -Encoding UTF8
   Write-Ok "Edge CDP startup script: $cdpScript"
 
@@ -247,9 +310,38 @@ if (-not $up) {
   }
   $action  = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$cdpScript`""
   $trigger = New-ScheduledTaskTrigger -AtLogOn
-  $settings= New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
-  Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -RunLevel Highest -Description "OpenClaw: restore portproxy + start Edge CDP at logon" | Out-Null
+  $settings = New-ScheduledTaskSettingsSet `
+    -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries `
+    -ExecutionTimeLimit (New-TimeSpan -Minutes 10) `
+    -RestartCount 3 `
+    -RestartInterval (New-TimeSpan -Minutes 1) `
+    -MultipleInstances IgnoreNew
+  $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest
+  Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Description "OpenClaw: restore portproxy + start dedicated Edge CDP at logon" | Out-Null
   Write-Ok "Scheduled task registered: $taskName (runs at logon)"
+
+  # Run the same scheduled task now so the first deploy does not need a logout.
+  Write-Info "Starting Edge CDP now..."
+  Start-ScheduledTask -TaskName $taskName
+  $cdpReady = $false
+  for ($i = 0; $i -lt 45; $i++) {
+    try {
+      $cdp = Invoke-RestMethod -TimeoutSec 2 "http://127.0.0.1:$CdpPort/json/version"
+      $cdpReady = $true
+      break
+    } catch {
+      Start-Sleep -Seconds 2
+    }
+  }
+  if (-not $cdpReady) {
+    throw "Edge CDP did not start. Check: $env:LOCALAPPDATA\OpenClaw\openclaw-cdp.log"
+  }
+  if (-not (Test-NetConnection -ComputerName $winHostIp -Port $CdpPort -InformationLevel Quiet)) {
+    throw "CDP works on localhost but the WSL portproxy is not reachable at ${winHostIp}:$CdpPort."
+  }
+  Write-Ok "Edge CDP ready: $($cdp.Browser)"
+  Write-Ok "WSL portproxy reachable at ${winHostIp}:$CdpPort"
 } else {
   Write-Section "STEP 4 - EDGE CDP"
   Write-Info "Skipped (run with -EnableBrowser to configure Edge CDP)"
@@ -268,7 +360,7 @@ Write-Host "  WINDOWS SETUP COMPLETE" -ForegroundColor Green
 Write-Host "============================================" -ForegroundColor Green
 Write-Host ""
 Write-Host "  Next:"
-Write-Host "    1. wsl --shutdown        (apply .wslconfig + systemd)"
-Write-Host "    2. Reopen WSL, run:  ./deploy.sh"
-Write-Host "    3. Validate:         bash ~/InitialSetup/healthcheck.sh (or healthcheck.sh in the deploy folder)"
+Write-Host "    1. Open $WslDistro"
+Write-Host "    2. Clone saai-zero-touch and run: ./deploy.sh"
+Write-Host "    3. Validate: bash ~/saai-deploy/healthcheck.sh"
 Write-Host ""
