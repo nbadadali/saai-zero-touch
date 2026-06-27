@@ -160,7 +160,7 @@ bash ~/saai-deploy/healthcheck.sh
 | WSL wake-up trigger | ✅ | `OpenClaw-Stack-DelayedStart` Scheduled Task (fires 90 s after logon) |
 | portproxy (9222) | ✅ → refreshed | Windows IP Helper + Scheduled Task |
 | Edge dedicated CDP profile | ✅ → relaunched | `OpenClaw-CDP-Autostart` task |
-| Windows host alias in WSL | ✅ → refreshed | `/usr/local/bin/saai-boot.sh` |
+| OpenClaw numeric CDP URL | ✅ → refreshed for the current WSL gateway | `/usr/local/bin/saai-boot.sh` |
 
 **How the startup chain works:** Windows fires the Scheduled Task 90 seconds
 after login, which runs `wsl.exe ... sleep 300`, keeping the WSL2 VM alive for
@@ -214,12 +214,15 @@ Usual causes: a `CHANGE_ME` left in `.env`, or Postgres/Redis not healthy yet.
 
 **Edge CDP not reachable from WSL** —
 ```bash
-curl --noproxy '*' http://windows-host:9222/json/version
+WIN_HOST_IP="$(ip route show default | awk '{print $3; exit}')"
+curl --noproxy '*' "http://${WIN_HOST_IP}:9222/json/version"
 ```
 If empty/refused, inspect `%LOCALAPPDATA%\OpenClaw\openclaw-cdp.log`,
 `%LOCALAPPDATA%\OpenClaw\cdp-listen-address.txt`, and the
 `OpenClaw-CDP-Autostart` Scheduled Task. The `portproxy` listener must use the
 current WSL gateway IP, not `0.0.0.0`, because Edge owns `127.0.0.1:9222`.
+Do not substitute a hostname for the numeric gateway: current Edge versions
+reject non-IP Host headers on the DevTools endpoint.
 
 ---
 

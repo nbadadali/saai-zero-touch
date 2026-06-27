@@ -52,12 +52,10 @@ wait_http() {
 
 # Is browser automation (Edge CDP) actually enabled for this deployment?
 BROWSER_ENABLED="false"
-WINDOWS_CDP_HOST="windows-host"
 WINDOWS_CDP_PORT="9222"
 OPENCLAW_BROWSER_PROFILE="windows-edge"
 if [[ -f "${CONFIG_FILE}" ]]; then
   BROWSER_ENABLED="$(bash -c "source '${CONFIG_FILE}' 2>/dev/null; echo \"\${ENABLE_BROWSER_AUTOMATION:-false}\"" 2>/dev/null || echo false)"
-  WINDOWS_CDP_HOST="$(bash -c "source '${CONFIG_FILE}' 2>/dev/null; echo \"\${WINDOWS_CDP_HOST:-windows-host}\"" 2>/dev/null || echo windows-host)"
   WINDOWS_CDP_PORT="$(bash -c "source '${CONFIG_FILE}' 2>/dev/null; echo \"\${WINDOWS_CDP_PORT:-9222}\"" 2>/dev/null || echo 9222)"
   OPENCLAW_BROWSER_PROFILE="$(bash -c "source '${CONFIG_FILE}' 2>/dev/null; echo \"\${OPENCLAW_BROWSER_PROFILE:-windows-edge}\"" 2>/dev/null || echo windows-edge)"
 fi
@@ -167,22 +165,22 @@ fi
 if [[ "${BROWSER_ENABLED}" != "true" ]]; then
   skip "Edge CDP: browser automation disabled (ENABLE_BROWSER_AUTOMATION=false) — not checked"
 else
-  CDP_RESOLVED_IP="$(getent ahostsv4 "${WINDOWS_CDP_HOST}" 2>/dev/null | awk 'NR==1{print $1}')"
+  CDP_RESOLVED_IP="$(ip route show default 2>/dev/null | awk '$0 !~ /docker0|br-|veth/ {print $3; exit}')"
   if [[ -z "${CDP_RESOLVED_IP}" ]]; then
-    fail "Edge CDP hostname '${WINDOWS_CDP_HOST}' does not resolve  →  re-run: ./deploy.sh --only browser"
-  fi
-
-  CDP_URL="http://${WINDOWS_CDP_HOST}:${WINDOWS_CDP_PORT}/json/version"
-  CDP_RESP="$(curl --noproxy '*' -fsS --connect-timeout 5 "${CDP_URL}" 2>/dev/null)"
-  if [[ -z "${CDP_RESP}" ]]; then
-    fail "Edge CDP (${WINDOWS_CDP_HOST}:${WINDOWS_CDP_PORT}): no response  →  check Windows task OpenClaw-CDP-Autostart"
+    fail "Edge CDP: Windows gateway not detected  →  re-run: ./deploy.sh --only browser"
   else
-    # Extract Browser field from JSON response to confirm it's actually Edge
-    BROWSER_VER="$(echo "${CDP_RESP}" | grep -o '"Browser": *"[^"]*"' | cut -d'"' -f4)"
-    if [[ -n "${BROWSER_VER}" ]]; then
-      chk "Edge CDP (${WINDOWS_CDP_HOST}:${WINDOWS_CDP_PORT}, ${CDP_RESOLVED_IP}): reachable — ${BROWSER_VER}"
+    CDP_URL="http://${CDP_RESOLVED_IP}:${WINDOWS_CDP_PORT}/json/version"
+    CDP_RESP="$(curl --noproxy '*' -fsS --connect-timeout 5 "${CDP_URL}" 2>/dev/null)"
+    if [[ -z "${CDP_RESP}" ]]; then
+      fail "Edge CDP (${CDP_RESOLVED_IP}:${WINDOWS_CDP_PORT}): no response  →  check Windows task OpenClaw-CDP-Autostart"
     else
-      warn "Edge CDP (${WINDOWS_CDP_HOST}:${WINDOWS_CDP_PORT}): responded but could not parse Browser field"
+      # Extract Browser field from JSON response to confirm it's actually Edge
+      BROWSER_VER="$(echo "${CDP_RESP}" | grep -o '"Browser": *"[^"]*"' | cut -d'"' -f4)"
+      if [[ -n "${BROWSER_VER}" ]]; then
+        chk "Edge CDP (${CDP_RESOLVED_IP}:${WINDOWS_CDP_PORT}): reachable — ${BROWSER_VER}"
+      else
+        warn "Edge CDP (${CDP_RESOLVED_IP}:${WINDOWS_CDP_PORT}): responded but could not parse Browser field"
+      fi
     fi
   fi
 

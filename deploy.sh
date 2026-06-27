@@ -58,7 +58,9 @@ OPENCLAW_INSTALL_METHOD="npm"; OPENCLAW_GATEWAY_PORT="18789"
 OPENCLAW_VERSION=""       # pin version, e.g. "1.4.2"; blank = install latest
 REPO_REVISION=""          # pin repo tag/commit, e.g. "v1.0.0"; blank = pull latest main
 ENABLE_BROWSER_AUTOMATION="true"
-WINDOWS_CDP_HOST="windows-host"; WINDOWS_CDP_PORT="9222"
+# Edge rejects non-IP Host headers on its DevTools endpoint, so CDP always uses
+# the numeric Windows gateway detected from WSL's current default route.
+WINDOWS_CDP_PORT="9222"
 OPENCLAW_BROWSER_PROFILE="windows-edge"
 N8N_ENCRYPTION_KEY=""; N8N_JWT_SECRET=""; DB_POSTGRESDB_PASSWORD=""
 PGVECTOR_PASSWORD=""; MCP_AUTH_TOKEN=""; N8N_API_KEY=""
@@ -214,8 +216,8 @@ LOG=/var/log/saai-boot.log
 exec >> "\$LOG" 2>&1
 echo "===== saai-boot \$(date) ====="
 
-# Keep a stable hostname for the Windows host. WSL's gateway IP may change after
-# shutdown/restart, while OpenClaw's remote CDP profile must use a stable URL.
+# Detect the numeric Windows gateway. Edge rejects DNS names in the DevTools
+# Host header, so OpenClaw must use the current IP rather than a stable alias.
 k=0; WIN_HOST_IP=""
 while [ "\$k" -lt 60 ]; do
   WIN_HOST_IP="\$(ip route show default 2>/dev/null | awk '\$0 !~ /docker0|br-|veth/ {print \$3; exit}')"
@@ -223,9 +225,19 @@ while [ "\$k" -lt 60 ]; do
   k=\$((k+1)); sleep 2
 done
 if [ -n "\$WIN_HOST_IP" ]; then
-  sed -i '/[[:space:]]${WINDOWS_CDP_HOST}\([[:space:]]\|\$\)/d' /etc/hosts 2>/dev/null || true
-  printf '%s\t%s\n' "\$WIN_HOST_IP" '${WINDOWS_CDP_HOST}' >> /etc/hosts
-  echo "Windows host alias: ${WINDOWS_CDP_HOST}=\$WIN_HOST_IP"
+  # Remove the alias written by older deploy.sh versions. Leaving it in place is
+  # harmless, but removing it prevents future diagnostics from using a URL that
+  # Edge will reject with HTTP 500.
+  sed -i '/[[:space:]]windows-host\([[:space:]]\|\$\)/d' /etc/hosts 2>/dev/null || true
+  echo "Windows CDP gateway: \$WIN_HOST_IP:${WINDOWS_CDP_PORT}"
+
+  # Refresh the Windows portproxy even when WSL was restarted without a Windows
+  # logon. The task is idempotent and ignores a duplicate concurrent instance.
+  if command -v powershell.exe >/dev/null 2>&1; then
+    powershell.exe -NoProfile -NonInteractive -Command "Start-ScheduledTask -TaskName 'OpenClaw-CDP-Autostart'" >/dev/null 2>&1 \
+      && echo "Windows CDP recovery task: triggered" \
+      || echo "WARNING: Windows CDP recovery task could not be triggered"
+  fi
 else
   echo "WARNING: Windows host gateway was not detected"
 fi
@@ -258,7 +270,19 @@ else
   echo "repo dir missing — cannot start stack"
 fi
 
-# 3) Start the OpenClaw gateway as the user. 'su -' alone does NOT set
+# 3) Keep the remote-CDP profile aligned with WSL's current gateway before the
+#    gateway starts. The WSL NAT gateway can change after a Windows restart or
+#    wsl --shutdown, so a numeric CDP URL must be refreshed on every VM boot.
+if [ '${ENABLE_BROWSER_AUTOMATION}' = 'true' ] && [ -n "\$WIN_HOST_IP" ] && \
+   [ -x '${NPM_GLOBAL}/bin/openclaw' ] && [ -f '${HOME_DIR}/.openclaw/openclaw.json' ]; then
+  if su - '${LINUX_USER}' -c "PATH='${NPM_GLOBAL}/bin:/usr/local/bin:/usr/bin:/bin' '${NPM_GLOBAL}/bin/openclaw' config set 'browser.profiles.${OPENCLAW_BROWSER_PROFILE}.cdpUrl' 'http://\$WIN_HOST_IP:${WINDOWS_CDP_PORT}'" >/dev/null 2>&1; then
+    echo "OpenClaw CDP URL refreshed: http://\$WIN_HOST_IP:${WINDOWS_CDP_PORT}"
+  else
+    echo "WARNING: OpenClaw CDP URL refresh failed"
+  fi
+fi
+
+# 4) Start the OpenClaw gateway as the user. 'su -' alone does NOT set
 #    XDG_RUNTIME_DIR in WSL, so first start the user's systemd manager (a system
 #    service), then start the gateway with XDG_RUNTIME_DIR explicitly set.
 UIDN="\$(id -u "${LINUX_USER}" 2>/dev/null)"
@@ -456,28 +480,16 @@ phase_browser() {
   fi
   $DRY_RUN && { echo "   ${YLW}[dry-run]${RST} would validate Windows CDP and configure an OpenClaw remote browser profile"; return 0; }
 
-  # Resolve the current Windows gateway and maintain a stable hostname. The WSL
-  # boot helper repeats this on every WSL start so OpenClaw config never contains
-  # an ephemeral gateway IP.
+  # Resolve the current Windows gateway. Edge 149 rejects a DNS name in the CDP
+  # Host header, so both validation and OpenClaw must use this numeric address.
+  # The WSL boot helper refreshes the profile if this gateway changes later.
   local win_host_ip cdp_url cdp_ready=false _i current_list updated_list
   win_host_ip="$(ip route show default 2>/dev/null | awk '$0 !~ /docker0|br-|veth/ {print $3; exit}')"
   [[ -n "${win_host_ip}" ]] || die "Could not detect the Windows host from the WSL default route."
-  sudo python3 - "${win_host_ip}" "${WINDOWS_CDP_HOST}" <<'PYEOF'
-import re, sys
-ip, alias = sys.argv[1], sys.argv[2]
-path = "/etc/hosts"
-try:
-    lines = open(path, encoding="utf-8").read().splitlines()
-except FileNotFoundError:
-    lines = []
-pattern = re.compile(r"(?:^|\s)" + re.escape(alias) + r"(?:\s|$)")
-lines = [line for line in lines if not pattern.search(line)]
-lines.append(f"{ip}\t{alias}")
-open(path, "w", encoding="utf-8").write("\n".join(lines) + "\n")
-PYEOF
-  ok "Windows host alias: ${WINDOWS_CDP_HOST} -> ${win_host_ip}"
+  sudo sed -i '/[[:space:]]windows-host\([[:space:]]\|$\)/d' /etc/hosts 2>/dev/null || true
+  ok "Windows CDP gateway: ${win_host_ip}:${WINDOWS_CDP_PORT}"
 
-  cdp_url="http://${WINDOWS_CDP_HOST}:${WINDOWS_CDP_PORT}"
+  cdp_url="http://${win_host_ip}:${WINDOWS_CDP_PORT}"
   if ! curl --noproxy '*' -fsS --connect-timeout 5 "${cdp_url}/json/version" >/dev/null 2>&1; then
     log "CDP is not ready; triggering the Windows recovery task"
     if command -v powershell.exe >/dev/null 2>&1; then

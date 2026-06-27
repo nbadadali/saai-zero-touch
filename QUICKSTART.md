@@ -107,8 +107,9 @@ Only two things need your attention on a fresh install:
 - `WEBHOOK_URL` / `N8N_EDITOR_BASE_URL` — leave as `http://localhost:5678` for local installs
 - `OPENCLAW_VERSION` — leave blank for latest
 
-Browser automation is enabled by default. `deploy.sh` maintains the stable
-`windows-host` alias and configures OpenClaw's `windows-edge` remote CDP profile.
+Browser automation is enabled by default. `deploy.sh` detects the current
+numeric Windows gateway and configures OpenClaw's `windows-edge` remote CDP
+profile. The boot helper refreshes that URL if WSL's gateway changes.
 
 Save and close (`Ctrl+X`, then `Y`, then `Enter` in nano).
 
@@ -279,8 +280,9 @@ netstat -an | Select-String "9222"
 **Check from WSL:**
 
 ```bash
-# Get Windows host IP and test CDP endpoint
-curl --noproxy '*' -s http://windows-host:9222/json/version | python3 -m json.tool
+# Get Windows host IP and test CDP endpoint. Edge requires a numeric Host header.
+WIN_HOST_IP="$(ip route show default | awk '{print $3; exit}')"
+curl --noproxy '*' -s "http://${WIN_HOST_IP}:9222/json/version" | python3 -m json.tool
 ```
 
 A successful response returns Edge browser information. If it times out, inspect:
@@ -323,4 +325,4 @@ Use this at the end of every client deployment:
 - [ ] http://localhost:5678 loads and login works
 - [ ] n8n API key generated and added to config.env
 - [ ] Machine rebooted and stack came back up automatically
-- [ ] `curl --noproxy '*' -s http://windows-host:9222/json/version` returns Edge browser info JSON
+- [ ] `curl --noproxy '*' -s "http://$(ip route show default | awk '{print $3; exit}'):9222/json/version"` returns Edge browser info JSON
